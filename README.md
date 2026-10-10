@@ -1,5 +1,8 @@
 # Jay Squad Sec — Userspace Core + Alert-Only Agent (v0.1)
 
+[![CI](https://github.com/kaymyg/jay-squad-sec/actions/workflows/ci.yml/badge.svg)](https://github.com/kaymyg/jay-squad-sec/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/kaymyg/jay-squad-sec/actions/workflows/codeql.yml/badge.svg)](https://github.com/kaymyg/jay-squad-sec/actions/workflows/codeql.yml)
+
 Rust implementation of the userspace core from the v2.0 architecture, plus a
 **deployable alert-only agent** with real userspace sensors (see `DEPLOY.md`).
 The core engine runs on a simulated millisecond clock, so risk decay and
