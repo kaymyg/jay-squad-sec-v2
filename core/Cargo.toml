@@ -1,0 +1,17 @@
+[package]
+name = "jay-squad-sec-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-independent security detection and decision engine for Jay Squad Sec"
+
+# The reusable security engine. Zero dependencies on purpose: builds anywhere,
+# no supply chain. This crate must stay platform-independent so Android, the
+# JNI bridge and other front ends can depend on it without contamination.
+#
+# The library name is kept as `jay_squad_sec` so downstream crates and the
+# existing modules keep importing it unchanged after the move into core/.
+[lib]
+name = "jay_squad_sec"
+path = "src/lib.rs"
+
+[dependencies]
