@@ -117,7 +117,7 @@ fn main() {
     let mut seen_conns: BTreeSet<(u32, String)> = BTreeSet::new();
     let mut sig_pending: Vec<(u32, String)> = Vec::new();
     let mut sig_done: BTreeSet<String> = BTreeSet::new();
-    let mut audit_printed = engine.audit.len();
+    let mut audit_seq = engine.audit_total();
     let mut polls: u64 = 0;
     let mut last_heartbeat = Instant::now();
 
@@ -233,11 +233,17 @@ fn main() {
                 alert(&mut log, now_ms, &line);
             }
         }
-        while audit_printed < engine.audit.len() {
-            let a = engine.audit[audit_printed].clone();
-            alert(&mut log, a.at_ms, &format!("ledger: {} {}", a.rtid.short(), a.what));
-            audit_printed += 1;
+        // Sequence-numbered: the ledger is a bounded ring, so index-based
+        // reading would skip or repeat entries once it starts evicting.
+        let (missed, entries) = engine.audit_since(audit_seq);
+        let entries: Vec<_> = entries.map(|(_, a)| a.clone()).collect();
+        if missed > 0 {
+            alert(&mut log, now_ms, &format!("ledger: {missed} entries dropped (ring full)"));
         }
+        for a in entries {
+            alert(&mut log, a.at_ms, &format!("ledger: {} {}", a.rtid.short(), a.what));
+        }
+        audit_seq = engine.audit_total();
         engine.prune_exited();
 
         // 7. Heartbeat + self-throttle (never hog the machine).

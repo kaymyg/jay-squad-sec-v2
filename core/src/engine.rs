@@ -17,7 +17,13 @@ use crate::vector::BehaviorVector;
 // BTreeMap, not HashMap: HashMap iteration order is randomly seeded per
 // instance, which made per-tick decision/log order and the process listing
 // nondeterministic. Ordered by Rtid, every run is reproducible.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+
+/// Audit ledger capacity. The ledger is a bounded ring: once full, the oldest
+/// entry is dropped for each new one, so a long-running engine (e.g. an
+/// Android service) has bounded memory. Use `audit_since` with sequence
+/// numbers to consume it without missing or repeating entries.
+pub const MAX_AUDIT: usize = 1024;
 
 /// Audit ledger entry — only meaningful security decisions, never raw telemetry.
 #[derive(Clone, Debug)]
@@ -41,7 +47,10 @@ pub struct ProcessState {
 pub struct Engine {
     pub bus: EventBus,
     pub caps: CapabilityManager,
-    pub audit: Vec<AuditEntry>,
+    /// Bounded ring of the most recent decisions (see [`MAX_AUDIT`]).
+    pub audit: VecDeque<AuditEntry>,
+    /// Total entries ever recorded; the sequence number of the next entry.
+    audit_total: u64,
     procs: BTreeMap<Rtid, ProcessState>,
     boot_nonce: u64,
     nonce_counter: u64,
@@ -58,7 +67,8 @@ impl Engine {
         Self {
             bus: EventBus::new(),
             caps: CapabilityManager::new(boot_nonce ^ 0xC0FFEE),
-            audit: Vec::new(),
+            audit: VecDeque::new(),
+            audit_total: 0,
             procs: BTreeMap::new(),
             boot_nonce,
             nonce_counter: 0,
@@ -125,7 +135,34 @@ impl Engine {
     }
 
     fn record(&mut self, at_ms: u64, rtid: Rtid, what: impl Into<String>) {
-        self.audit.push(AuditEntry { at_ms, rtid, what: what.into() });
+        if self.audit.len() >= MAX_AUDIT {
+            self.audit.pop_front();
+        }
+        self.audit.push_back(AuditEntry { at_ms, rtid, what: what.into() });
+        self.audit_total += 1;
+    }
+
+    /// Total audit entries ever recorded. Entry `n` (0-based) is the n-th
+    /// decision since the engine started; this is the next sequence number.
+    pub fn audit_total(&self) -> u64 {
+        self.audit_total
+    }
+
+    /// Entries with sequence number >= `seq`, oldest first, paired with their
+    /// sequence numbers, plus how many requested entries were already evicted
+    /// from the ring (0 if the consumer kept up).
+    pub fn audit_since(&self, seq: u64) -> (u64, impl Iterator<Item = (u64, &AuditEntry)>) {
+        let first = self.audit_total - self.audit.len() as u64;
+        let missed = first.saturating_sub(seq);
+        // try_from, not `as`: on 32-bit targets `as usize` would truncate.
+        let skip = usize::try_from(seq.saturating_sub(first)).unwrap_or(usize::MAX);
+        let iter = self
+            .audit
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .map(move |(i, a)| (first + i as u64, a));
+        (missed, iter)
     }
 
     /// Register a new process: derive RTID, publish start + signature evidence.
@@ -388,5 +425,35 @@ mod tests {
         assert_eq!(e.process(p).unwrap().action, PolicyAction::Monitor);
         e.tick(120_000); // two half-lives later
         assert_eq!(e.process(p).unwrap().action, PolicyAction::Allow);
+    }
+}
+
+#[cfg(test)]
+mod audit_ring_tests {
+    use super::*;
+
+    #[test]
+    fn audit_is_bounded_and_sequence_numbers_are_stable() {
+        let mut e = Engine::new(1);
+        let r = Rtid(1);
+        for i in 0..(MAX_AUDIT as u64 + 10) {
+            e.record(i, r, format!("d{i}"));
+        }
+        assert_eq!(e.audit.len(), MAX_AUDIT, "ring must stay bounded");
+        assert_eq!(e.audit_total(), MAX_AUDIT as u64 + 10);
+        // A consumer that last saw seq 3 missed the evicted ones, then
+        // resumes exactly at the oldest retained entry.
+        let (missed, mut it) = e.audit_since(3);
+        assert_eq!(missed, 7);
+        let (seq, a) = it.next().unwrap();
+        assert_eq!((seq, a.what.as_str()), (10, "d10"));
+        // A caught-up consumer gets nothing and misses nothing.
+        let (missed, mut it) = e.audit_since(e.audit_total());
+        assert_eq!(missed, 0);
+        assert!(it.next().is_none());
+        // Resuming mid-ring returns exactly the tail.
+        let (_, it) = e.audit_since(MAX_AUDIT as u64 + 8);
+        let tail: Vec<_> = it.map(|(s, a)| (s, a.what.clone())).collect();
+        assert_eq!(tail, vec![(1032, "d1032".into()), (1033, "d1033".into())]);
     }
 }
