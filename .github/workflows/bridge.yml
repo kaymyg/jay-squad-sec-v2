@@ -1,0 +1,34 @@
+name: Android bridge scaffold
+
+on:
+  push:
+    branches:
+      - stage-1/bridge-hardening
+    paths:
+      - "bridge/**"
+      - "core/**"
+      - "protocol/**"
+      - ".github/workflows/bridge.yml"
+  pull_request:
+    paths:
+      - "bridge/**"
+      - "core/**"
+      - "protocol/**"
+      - ".github/workflows/bridge.yml"
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust MSRV
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.75.0
+          components: rustfmt, clippy
+      - name: Format bridge
+        run: cargo fmt --manifest-path bridge/Cargo.toml -- --check
+      - name: Test bridge
+        run: cargo test --manifest-path bridge/Cargo.toml --locked
+      - name: Clippy bridge
+        run: cargo clippy --manifest-path bridge/Cargo.toml --all-targets --locked -- -D warnings
