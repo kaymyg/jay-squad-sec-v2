@@ -241,6 +241,57 @@ pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeTak
     }
 }
 
+
+/// `static native long nativeLoadRules(long handle, byte[] storageDir)`.
+/// Returns installed rules version, or the negative bridge error code.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeLoadRules(
+    env: Env,
+    _cls: JClass,
+    handle: JLong,
+    storage_dir: JByteArray,
+) -> JLong {
+    let result = guarded(|| {
+        // SAFETY: env and array reference are supplied by the JVM.
+        let dir = unsafe { read_byte_array(env, storage_dir, 4096)? };
+        crate::load_signed_rules(handle_from(handle), &dir)
+    });
+    match result {
+        Ok(Ok(version)) => JLong::try_from(version).unwrap_or(-ERR_INVALID as JLong),
+        Ok(Err(code)) => -(code as JLong),
+        Err(code) => -(code as JLong),
+    }
+}
+
+/// `static native long nativeApplyRules(long handle, byte[] storageDir,
+///     byte[] signedPatch)`.
+/// Returns installed rules version, or the negative bridge error code.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeApplyRules(
+    env: Env,
+    _cls: JClass,
+    handle: JLong,
+    storage_dir: JByteArray,
+    signed_patch: JByteArray,
+) -> JLong {
+    let result = guarded(|| {
+        // SAFETY: env and array references are supplied by the JVM; lengths
+        // are checked before allocation by read_byte_array.
+        let (dir, patch) = unsafe {
+            (
+                read_byte_array(env, storage_dir, 4096)?,
+                read_byte_array(env, signed_patch, jay_squad_sec_apply::MAX_PATCH_FILE_BYTES as usize)?,
+            )
+        };
+        crate::apply_signed_rules(handle_from(handle), &dir, &patch)
+    });
+    match result {
+        Ok(Ok(version)) => JLong::try_from(version).unwrap_or(-ERR_INVALID as JLong),
+        Ok(Err(code)) => -(code as JLong),
+        Err(code) => -(code as JLong),
+    }
+}
+
 /// `static native int nativeAbiVersion()`.
 #[no_mangle]
 pub extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeAbiVersion(
