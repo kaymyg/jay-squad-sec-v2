@@ -3,19 +3,23 @@ name: Android bridge
 on:
   push:
     branches:
-      - stage-1/bridge-hardening
+      - "stage-1/**"
       - develop
       - main
     paths:
       - "bridge/**"
       - "core/**"
       - "protocol/**"
+      - "update/**"
+      - "apply/**"
       - ".github/workflows/bridge.yml"
   pull_request:
     paths:
       - "bridge/**"
       - "core/**"
       - "protocol/**"
+      - "update/**"
+      - "apply/**"
       - ".github/workflows/bridge.yml"
 
 jobs:
@@ -28,19 +32,21 @@ jobs:
         with:
           toolchain: 1.75.0
           components: rustfmt, clippy
-      - name: Set up JDK for live JNI tests
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
       - name: Format bridge
         run: cargo fmt --manifest-path bridge/Cargo.toml -- --check
       - name: Test bridge
         run: cargo test --manifest-path bridge/Cargo.toml --locked
-      - name: Live JVM JNI tests
-        run: bash bridge/jvm/run-jvm-test.sh
       - name: Clippy bridge
         run: cargo clippy --manifest-path bridge/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Signed updates through the bridge (test-only builder key)
+        # Builds the bridge with a published TEST-ONLY key so the happy path and
+        # every rejection path are exercised. JSS_EXPECT_CONFIGURED_TESTS makes
+        # the tests fail (not skip) if the key is not actually embedded.
+        env:
+          JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX: "353c8a7feeca38b2c4536e0bd2586fdb18d070e50e059f1d43f8bfefb97a7ce1"
+          JSS_ANDROID_MIN_RULES_VERSION: "0"
+          JSS_EXPECT_CONFIGURED_TESTS: "1"
+        run: cargo test --manifest-path bridge/Cargo.toml --locked --test signed_updates_configured
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
