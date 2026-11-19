@@ -64,6 +64,7 @@ dependencies = [
 name = "jay-squad-sec-agent"
 version = "0.1.0"
 dependencies = [
+ "jay-squad-sec-apply",
  "jay-squad-sec-core",
 ]
 
@@ -98,6 +99,7 @@ name = "jay-squad-sec-update"
 version = "0.1.0"
 dependencies = [
  "ed25519-compact",
+ "jay-squad-sec-update",
 ]
 
 [[package]]

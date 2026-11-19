@@ -61,6 +61,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jay-squad-sec-core"
+version = "0.1.0"
+
+[[package]]
+name = "jay-squad-sec-protocol"
+version = "0.1.0"
+dependencies = [
+ "jay-squad-sec-core",
+]
+
+[[package]]
 name = "jay-squad-sec-update"
 version = "0.1.0"
 dependencies = [
@@ -71,6 +82,8 @@ dependencies = [
 name = "jaysec-signer"
 version = "0.1.0"
 dependencies = [
+ "jay-squad-sec-core",
+ "jay-squad-sec-protocol",
  "jay-squad-sec-update",
 ]
 

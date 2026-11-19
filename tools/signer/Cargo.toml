@@ -12,6 +12,8 @@ description = "Offline builder tooling: generate keys, sign patches, and self-ve
 
 [dependencies]
 jay-squad-sec-update = { path = "../../update", features = ["signing"] }
+jay-squad-sec-core = { path = "../../core" }
+jay-squad-sec-protocol = { path = "../../protocol" }
 
 [[bin]]
 name = "jaysec-keygen"
@@ -24,3 +26,7 @@ path = "src/bin/sign.rs"
 [[bin]]
 name = "jaysec-verify"
 path = "src/bin/verify.rs"
+
+[[bin]]
+name = "jaysec-rules"
+path = "src/bin/rules.rs"

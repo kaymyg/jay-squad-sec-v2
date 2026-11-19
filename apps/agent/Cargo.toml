@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 jay-squad-sec-core = { path = "../../core" }
+jay-squad-sec-apply = { path = "../../apply" }

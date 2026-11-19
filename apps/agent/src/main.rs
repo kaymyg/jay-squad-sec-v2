@@ -9,8 +9,16 @@
 //!   jaysec-agent --interval-ms 5000   gentler polling
 //!   jaysec-agent --duration-secs 60   timed run (for testing)
 //!   jaysec-agent --log FILE           alert log location (default jaysec_alerts.log)
+//!
+//! Signed rule updates (data only: risk weights/thresholds, never code):
+//!   --update-dir DIR      where verified rules are stored; loaded at startup
+//!   --apply-patch FILE    verify + install a signed .jssp rules patch first
+//!   --pubkey-file FILE    builder public key (dev builds only; ignored when a
+//!                         key is compiled in via EMBEDDED_PUBLIC_KEY)
+//! Without a usable key the agent runs on the compiled-in default rules.
 
 use jay_squad_sec::engine::Engine;
+use jay_squad_sec_apply::{StateSource, UpdateStore};
 use jay_squad_sec::event::{Event, EventKind};
 use jay_squad_sec::risk::PolicyAction;
 use jay_squad_sec::rtid::Rtid;
@@ -24,6 +32,15 @@ const AUTORUN_EVERY_N_POLLS: u64 = 15;
 const STABLE_TICK_AFTER_MS: u64 = 60_000;
 const MAX_INTERVAL_MS: u64 = 10_000;
 
+/// Product id bound into every patch for this agent. A patch signed for any
+/// other product (e.g. the Android app) is rejected.
+const AGENT_PRODUCT_ID: &str = "jay-squad-sec-agent";
+
+/// Release builds embed the builder's public key here (from jaysec-keygen).
+/// While this is `Some`, `--pubkey-file` is ignored, so whoever controls the
+/// agent's command line cannot point it at their own key.
+const EMBEDDED_PUBLIC_KEY: Option<[u8; 32]> = None;
+
 struct Tracked {
     rtid: Rtid,
     exe: String,
@@ -35,14 +52,21 @@ fn main() {
     let mut interval_ms: u64 = 2_000;
     let mut duration_secs: u64 = 0;
     let mut log_path = "jaysec_alerts.log".to_string();
+    let mut update_dir: Option<String> = None;
+    let mut pubkey_file: Option<String> = None;
+    let mut apply_patch: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--interval-ms" => interval_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(2_000),
             "--duration-secs" => duration_secs = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--log" => log_path = args.next().unwrap_or(log_path),
+            "--update-dir" => update_dir = args.next(),
+            "--pubkey-file" => pubkey_file = args.next(),
+            "--apply-patch" => apply_patch = args.next(),
             "--help" | "-h" => {
                 println!("jaysec-agent [--interval-ms N] [--duration-secs N] [--log FILE]");
+                println!("             [--update-dir DIR] [--apply-patch FILE] [--pubkey-file FILE]");
                 return;
             }
             _ => {}
@@ -56,7 +80,8 @@ fn main() {
         .append(true)
         .open(&log_path)
         .expect("cannot open alert log");
-    let boot_nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+    // unwrap_or_default: a clock set before 1970 must not crash the agent.
+    let boot_nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
     let mut engine = Engine::new(boot_nonce);
     engine.set_alert_only(true);
     let mut sensor = platform_sensor();
@@ -64,6 +89,7 @@ fn main() {
     let own_pid = std::process::id();
 
     banner(&mut log, &log_path, base_interval);
+    load_rules(&mut engine, &mut log, update_dir.as_deref(), pubkey_file.as_deref(), apply_patch.as_deref());
 
     // --- Baseline: adopt everything already running, quietly. ---
     let mut tracked: HashMap<u32, Tracked> = HashMap::new();
@@ -254,8 +280,84 @@ fn publish(engine: &mut Engine, rtid: Rtid, kind: EventKind, detail: &str, now_m
     engine.bus.publish(Event { rtid, kind, at_ms: now_ms, detail: detail.to_string() });
 }
 
+/// Resolve the update store, optionally apply a patch, then install the
+/// verified rules into the engine. Every outcome is printed and logged; any
+/// failure leaves the engine on its current (default or last-verified) rules.
+fn load_rules(
+    engine: &mut Engine,
+    log: &mut std::fs::File,
+    update_dir: Option<&str>,
+    pubkey_file: Option<&str>,
+    apply_patch: Option<&str>,
+) {
+    let say = |log: &mut std::fs::File, msg: String| {
+        println!("{msg}");
+        alert(log, 0, &msg);
+    };
+    let key = match EMBEDDED_PUBLIC_KEY {
+        Some(k) => {
+            if pubkey_file.is_some() {
+                say(log, "[update] --pubkey-file ignored: this build has an embedded key".into());
+            }
+            Some(k)
+        }
+        None => pubkey_file.and_then(|p| match read_pubkey_hex(p) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                say(log, format!("[update] cannot use public key {p}: {e}"));
+                None
+            }
+        }),
+    };
+    let (Some(dir), Some(key)) = (update_dir, key) else {
+        if apply_patch.is_some() || update_dir.is_some() {
+            say(log, "[update] updates need --update-dir and a builder public key; using default rules".into());
+        }
+        return;
+    };
+    let store = UpdateStore::new(dir, key, AGENT_PRODUCT_ID);
+    if let Some(patch) = apply_patch {
+        match store.apply_patch_file(std::path::Path::new(patch)) {
+            Ok(i) => say(log, format!("[update] patch applied: rules v{}", i.version)),
+            Err(e) => say(log, format!("[update] patch REJECTED, nothing changed: {e}")),
+        }
+    }
+    let installed = store.load();
+    match engine.set_rules(installed.rules) {
+        Ok(()) => {
+            let src = match installed.source {
+                StateSource::Default => "compiled-in defaults",
+                StateSource::Current => "verified update",
+                StateSource::RecoveredFromPrevious => "previous verified update (current state was invalid)",
+            };
+            say(log, format!(
+                "[update] active rules v{} from {src}; block at risk {}",
+                installed.version,
+                engine.rules().block_at
+            ));
+        }
+        Err(e) => say(log, format!("[update] verified rules failed validation, keeping defaults: {e}")),
+    }
+}
+
+/// Parse a 64-hex-char public key file (as written by jaysec-keygen).
+fn read_pubkey_hex(path: &str) -> Result<[u8; 32], String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let b = text.trim().as_bytes();
+    if b.len() != 64 {
+        return Err("expected 64 hex characters".into());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = (b[i * 2] as char).to_digit(16).ok_or("non-hex character")?;
+        let lo = (b[i * 2 + 1] as char).to_digit(16).ok_or("non-hex character")?;
+        *byte = (hi * 16 + lo) as u8;
+    }
+    Ok(out)
+}
+
 fn alert(log: &mut std::fs::File, now_ms: u64, msg: &str) {
-    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let _ = writeln!(log, "{epoch} t+{}s {msg}", now_ms / 1000);
 }
 
@@ -264,6 +366,6 @@ fn banner(log: &mut std::fs::File, log_path: &str, interval: u64) {
     println!("No process will be killed, suspended or blocked by this agent.");
     println!("Poll interval {interval}ms (self-throttling). Alerts -> {log_path}");
     println!("This complements, not replaces, your OS antivirus.\n");
-    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let _ = writeln!(log, "{epoch} === agent started (alert-only) ===");
 }
