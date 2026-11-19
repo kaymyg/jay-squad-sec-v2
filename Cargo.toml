@@ -20,6 +20,7 @@ members = [
     "core",
     "protocol",
     "update",
+    "apply",
     "apps/demo",
     "apps/agent",
 ]

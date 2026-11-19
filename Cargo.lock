@@ -68,6 +68,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jay-squad-sec-apply"
+version = "0.1.0"
+dependencies = [
+ "jay-squad-sec-core",
+ "jay-squad-sec-update",
+]
+
+[[package]]
 name = "jay-squad-sec-core"
 version = "0.1.0"
 

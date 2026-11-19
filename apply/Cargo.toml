@@ -1,0 +1,18 @@
+[package]
+name = "jay-squad-sec-apply"
+version = "0.1.0"
+edition = "2021"
+description = "Safe, atomic, self-authenticating application of verified rule updates"
+
+# Product-side: verify-only. Never enables the update crate's `signing`
+# feature in a normal build; only the test build signs fixtures.
+[lib]
+name = "jay_squad_sec_apply"
+path = "src/lib.rs"
+
+[dependencies]
+jay-squad-sec-core = { path = "../core" }
+jay-squad-sec-update = { path = "../update", default-features = false }
+
+[dev-dependencies]
+jay-squad-sec-update = { path = "../update", features = ["signing"] }
