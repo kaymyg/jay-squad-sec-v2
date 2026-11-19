@@ -21,6 +21,8 @@ public final class NativeBridge {
     public static final int ERR_BAD_HANDLE = 7;
     public static final int ERR_BUFFER_TOO_SMALL = 8;
     public static final int ERR_STALE_GENERATION = 9;
+    public static final int ERR_UPDATE_NOT_CONFIGURED = 10;
+    public static final int ERR_UPDATE_REJECTED = 11;
 
     /** ABI version this Java/Kotlin code was written against. */
     public static final int EXPECTED_ABI = 3;
@@ -37,6 +39,12 @@ public final class NativeBridge {
 
     /** Newline-separated UTF-8 alert lines; empty if none; null on error. */
     public static native byte[] nativeTakeAlerts(long handle, int maxBytes);
+
+    /** Load persisted, builder-signed rules. Returns version, or a negative error code. */
+    public static native long nativeLoadRules(long handle, byte[] storageDir);
+
+    /** Verify, install and activate a signed data-only patch. Returns version, or a negative error code. */
+    public static native long nativeApplyRules(long handle, byte[] storageDir, byte[] signedPatch);
 
     public static native int nativeAbiVersion();
 }
