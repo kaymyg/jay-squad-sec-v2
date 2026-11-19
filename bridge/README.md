@@ -108,6 +108,33 @@ same JNI ABI.
 
 Each review regression test was checked to fail when its bug is put back.
 
+## Signed rules updates
+
+The JNI API exposes `loadRules(appPrivateDir)` and
+`applyRules(appPrivateDir, signedPatchBytes)`. The app supplies only the
+app-private storage directory and patch bytes. It cannot supply or override
+the builder public key or product identity.
+
+The Android product identity is fixed to
+`jay-squad-sec-android`. The native bridge embeds its builder public key at
+compile time through `JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX` (exactly 64 hex
+characters). If the key is missing or malformed, both update operations fail
+closed with `ERR_UPDATE_NOT_CONFIGURED`. The optional
+`JSS_ANDROID_MIN_RULES_VERSION` compile-time setting establishes the
+minimum accepted patch version; production releases must set this to the
+minimum rules version they intend to support, rather than relying on 0.
+
+The update payload is decoded as `RulesConfig` and fully validated by the
+core before installation and again before activation. The patch container is
+Ed25519-verified for the Android product ID, checked against the installed
+version and minimum version, then persisted atomically by `apply`. No dynamic
+library, executable, script, bytecode or arbitrary code is accepted. Rejected
+patches leave the active rules unchanged and produce an alert.
+
+Builder workflow: sign rules with product ID `jay-squad-sec-android`, not
+`jay-squad-sec-agent`. Keep the signing private key offline. Embed only the
+matching public key in the Android native release build.
+
 ## Not done yet
 
 - Cross-compile with the Android NDK (arm64-v8a, armeabi-v7a, x86_64) and run
