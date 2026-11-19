@@ -26,3 +26,19 @@ fn rules_apply_fails_closed_when_builder_key_is_not_embedded() {
     assert_eq!(engine_free(handle), 0);
 }
 
+#[test]
+fn a_key_without_an_explicit_min_version_fails_closed() {
+    // Only meaningful in a build that embeds a key but omits the minimum
+    // version; production builds must set it deliberately (even to 0).
+    if option_env!("JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX").is_none()
+        || option_env!("JSS_ANDROID_MIN_RULES_VERSION").is_some()
+    {
+        return;
+    }
+    let handle = engine_new(17);
+    assert_eq!(
+        load_signed_rules(handle, b"/private/app/files/jss"),
+        Err(ERR_UPDATE_NOT_CONFIGURED)
+    );
+    assert_eq!(engine_free(handle), 0);
+}

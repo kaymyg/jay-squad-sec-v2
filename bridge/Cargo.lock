@@ -20,9 +20,11 @@ dependencies = [
 name = "jay-squad-sec-bridge"
 version = "0.1.0"
 dependencies = [
+ "ed25519-compact",
  "jay-squad-sec-apply",
  "jay-squad-sec-core",
  "jay-squad-sec-protocol",
+ "jay-squad-sec-update",
 ]
 
 [[package]]

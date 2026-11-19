@@ -202,7 +202,11 @@ pub fn generate_keypair() -> ([u8; 32], [u8; 64]) {
 
 /// Canonical, deterministic byte layout that gets signed and verified. Length
 /// prefixes make the encoding unambiguous (no field-boundary confusion).
-fn signing_message(m: &PatchManifest, payload: &[u8]) -> Vec<u8> {
+///
+/// Public so an external signer (e.g. an HSM or offline signing service) can
+/// produce a detached signature over exactly these bytes. Exposing it grants
+/// nothing: a valid signature still requires the builder's private key.
+pub fn signing_message(m: &PatchManifest, payload: &[u8]) -> Vec<u8> {
     let pid = m.product_id.as_bytes();
     let mut b = Vec::with_capacity(DOMAIN.len() + 28 + pid.len() + payload.len());
     b.extend_from_slice(DOMAIN);
