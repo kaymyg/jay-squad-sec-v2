@@ -1,0 +1,26 @@
+# Standalone workspace: offline builder tooling, never part of the shipped
+# product. It is the ONLY place that uses the update crate's `signing` feature
+# (and therefore the private key). Keep it off user devices.
+[workspace]
+
+[package]
+name = "jaysec-signer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline builder tooling: generate keys, sign patches, and self-verify before shipping"
+
+[dependencies]
+jay-squad-sec-update = { path = "../../update", features = ["signing"] }
+
+[[bin]]
+name = "jaysec-keygen"
+path = "src/bin/keygen.rs"
+
+[[bin]]
+name = "jaysec-sign"
+path = "src/bin/sign.rs"
+
+[[bin]]
+name = "jaysec-verify"
+path = "src/bin/verify.rs"
