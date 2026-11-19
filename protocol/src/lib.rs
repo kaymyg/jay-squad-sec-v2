@@ -73,6 +73,10 @@ pub enum ValidationError {
     DetailTooLong { len: usize, max: usize },
     /// `detail` contained a control character (newline, NUL, …).
     ControlCharInDetail,
+    /// `detail` contained a bidirectional-override or zero-width character.
+    /// These are invisible or reorder text, enabling "Trojan Source"-style
+    /// spoofing of paths and endpoints in operator-facing logs and UI.
+    UnsafeCharInDetail,
 }
 
 impl fmt::Display for ValidationError {
@@ -89,8 +93,22 @@ impl fmt::Display for ValidationError {
             ValidationError::ControlCharInDetail => {
                 write!(f, "detail contains a control character")
             }
+            ValidationError::UnsafeCharInDetail => {
+                write!(f, "detail contains a bidi-override or zero-width character")
+            }
         }
     }
+}
+
+/// Bidirectional-override and zero-width codepoints. Invisible or
+/// text-reordering, so they must not reach logs, evidence records or the UI.
+fn is_unsafe_display_char(c: char) -> bool {
+    matches!(c,
+        '\u{202A}'..='\u{202E}'   // LRE, RLE, PDF, LRO, RLO
+        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{200B}'..='\u{200D}' // ZWSP, ZWNJ, ZWJ
+        | '\u{2060}'              // word joiner
+        | '\u{FEFF}')             // BOM / zero-width no-break space
 }
 
 impl std::error::Error for ValidationError {}
@@ -165,6 +183,9 @@ pub fn validate(ev: &WireEvent) -> Result<ValidatedEvent, ValidationError> {
     }
     if ev.detail.chars().any(|c| c.is_control()) {
         return Err(ValidationError::ControlCharInDetail);
+    }
+    if ev.detail.chars().any(is_unsafe_display_char) {
+        return Err(ValidationError::UnsafeCharInDetail);
     }
     let kind = kind_from_wire(&ev.kind).ok_or(ValidationError::UnknownKind)?;
     Ok(ValidatedEvent {
@@ -257,6 +278,19 @@ mod tests {
             assert_eq!(
                 validate(&w),
                 Err(ValidationError::ControlCharInDetail),
+                "should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bidi_and_zero_width_chars_are_rejected() {
+        for bad in ["evil\u{202E}txt.exe", "zero\u{200B}width", "bom\u{FEFF}here"] {
+            let mut w = good();
+            w.detail = bad.into();
+            assert_eq!(
+                validate(&w),
+                Err(ValidationError::UnsafeCharInDetail),
                 "should reject {bad:?}"
             );
         }
