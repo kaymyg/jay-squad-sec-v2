@@ -1,9 +1,11 @@
-name: Android bridge scaffold
+name: Android bridge
 
 on:
   push:
     branches:
       - stage-1/bridge-hardening
+      - develop
+      - main
     paths:
       - "bridge/**"
       - "core/**"
@@ -32,3 +34,10 @@ jobs:
         run: cargo test --manifest-path bridge/Cargo.toml --locked
       - name: Clippy bridge
         run: cargo clippy --manifest-path bridge/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: JNI boundary in a live JVM (-Xcheck:jni)
+        run: bridge/jvm/run-jvm-test.sh

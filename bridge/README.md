@@ -1,57 +1,99 @@
-# Android bridge scaffold
+# Android bridge (ABI v3)
 
-This is a Rust C-ABI boundary intended to be wrapped by a future Kotlin/JNI
-module. It is **not yet a complete JNI bridge** and is not part of the root
-Cargo workspace until its ABI, lifecycle, and concurrency contracts are
-reviewed and compiled in the Android NDK build.
+The boundary between the Android app and the Rust security engine. It has
+two front doors over one implementation:
 
-## Current ABI v2
+- **JNI** for the Kotlin wrapper (`jvm/kotlin/.../JaySquadSecEngine.kt`),
+  via the native methods declared in `jvm/src/.../NativeBridge.java`;
+- a **C ABI** (`jss_*`) for native callers and tests.
 
-- `jss_bridge_abi_version`: returns ABI version 2.
-- `jss_engine_new`: creates an alert-only engine handle.
-- `jss_engine_submit_event`: accepts bounded byte buffers, validates the
-  event through the protocol crate, and serializes access to the engine.
-- `jss_engine_free`: releases the opaque handle.
+It is kept out of the root Cargo workspace (it builds as its own workspace)
+until it is cross-compiled with the Android NDK.
 
-## Hardening included in this branch
+## Ownership contract
 
-- Replaced unbounded NUL-terminated C strings with explicit pointer/length
-  byte buffers and strict maximum lengths (kind 64 bytes, identity 512 bytes,
-  detail limited by the protocol's 4 KiB limit).
-- Rejects invalid UTF-8, empty required fields, zero PID and zero process
-  generation before the event reaches the engine.
-- Uses a mutex to serialize concurrent event submissions per handle and
-  returns an explicit error if the mutex is poisoned.
-- Keys process identity by `(pid, process_generation)`, so PID reuse can be
-  represented without silently reusing the previous process identity.
-- Removes the identity mapping after a process-exit event.
-- Contains Rust panics at the C ABI boundary.
+Handles are **opaque registry IDs**, not pointers. A global registry maps IDs
+to reference-counted engines, and IDs are never reused (0 is invalid). Every
+call looks its handle up and holds its own reference for the length of the
+call. As a result:
 
-## FFI safety contract that remains
+| Caller mistake | Result |
+|---|---|
+| Double close | `ERR_BAD_HANDLE` |
+| Use after close | `ERR_BAD_HANDLE` (JNI `takeAlerts`: `null`) |
+| Close while other threads are inside calls | Safe: the handle stops resolving at once and the engine is dropped when the last in-flight call returns |
+| Bogus or zero handle | `ERR_BAD_HANDLE` |
 
-A raw-pointer C ABI cannot defend against an invalid pointer supplied by a
-hostile caller. The caller must provide readable buffers for the declared
-lengths, pass a live handle, and prevent `jss_engine_free` from racing with
-in-flight calls. The Kotlin wrapper must own the handle exactly once, serialize
-close against submissions, and never expose this ABI to untrusted native code.
+The Kotlin wrapper adds an idempotent `close()`, a `Cleaner` fallback if the
+object is collected unclosed, and maps error codes to exceptions.
 
-The Android adapter must provide a monotonically increasing process
-generation and canonical package identity including the signing-certificate
-digest. A PID alone is not a durable process identity.
+The one obligation left on a caller applies only to the **C ABI**: a buffer
+passed as pointer and length must be readable for that length during the
+call. The JNI path copies Java arrays itself (`GetByteArrayRegion`, after a
+length check), so it has no such obligation.
 
-## Required before Android integration
+## Identity
 
-1. Add a generated C header and JNI registration layer.
-2. Implement a Kotlin `Closeable` owner with synchronized close/submission.
-3. Add native tests for malformed buffers, maximum lengths, PID reuse,
-   concurrent submissions and close lifecycle.
-4. Return structured decisions and incident IDs rather than discarding tick
-   output.
-5. Cross-compile for supported Android ABIs with the Android NDK and run
-   integration tests on physical, non-rooted devices.
-6. Fuzz the FFI boundary and review pointer/ownership assumptions independently.
-7. Keep alert-only behaviour as the default. Do not enable unsupported Android
-   process killing or arbitrary permission revocation.
+Events are keyed by `(pid, process_generation)`. The Android adapter must
+change the generation whenever a PID is reused, and must supply a canonical
+package identity (package name plus signing-certificate digest).
 
-This branch is a hardened scaffold, not a working Android app or a claim that
-the FFI is production-safe.
+- A live `(pid, generation)` can never change identity: `ERR_IDENTITY_MISMATCH`.
+- A `process_exit` event retires the identity and drops its engine state, so
+  a reused PID never inherits the previous process's risk.
+
+## Bounds
+
+| Limit | Value | When reached |
+|---|---|---|
+| Live engines per process | 8 | `new` returns 0 |
+| Live identities per engine | 4096 | `ERR_CAPACITY`; an exit frees a slot |
+| Queued alert lines per engine | 256 | Oldest dropped; next `take` starts with a `[bridge] N alerts dropped` line |
+| Alert line length | 1024 bytes | Truncated at a char boundary |
+| Package identity / kind / detail | 512 / 64 / 4096 bytes | `ERR_INVALID` |
+| Engine audit ledger | 1024 entries (ring, in `core`) | Oldest dropped; consumers use sequence numbers |
+
+All text input must be valid UTF-8 without control characters. Detail is also
+checked for bidi-override and zero-width characters by the protocol crate.
+
+## Error codes
+
+`OK 0`, `ERR_NULL 1`, `ERR_INVALID 2`, `ERR_PANIC 3`, `ERR_POISONED 4`,
+`ERR_CAPACITY 5`, `ERR_IDENTITY_MISMATCH 6`, `ERR_BAD_HANDLE 7`,
+`ERR_BUFFER_TOO_SMALL 8`. A panic inside the bridge is caught and reported
+as `ERR_PANIC`, never unwound into the JVM or a C caller. A poisoned engine
+lock makes only that handle unusable.
+
+## Alerts
+
+Engines are always alert-only. `take_alerts` returns newline-separated UTF-8
+lines, oldest first, and never splits a line. Lines that don't fit stay
+queued for the next call. The C ABI needs a buffer of at least
+`MIN_ALERT_BUFFER` (1025) bytes; JNI raises smaller requests to that.
+
+## Testing
+
+```
+cargo test --manifest-path bridge/Cargo.toml   # Rust: C ABI + JNI table pin
+bridge/jvm/run-jvm-test.sh                     # live JVM, -Xcheck:jni
+```
+
+The JVM test loads the real shared library and calls the same native methods
+the Android app calls. It covers detection flowing out to Java, double close,
+use after close, closing under 8 concurrent submitting threads (20 rounds),
+null arrays, hostile input, identity changes and capacity. Android's runtime
+uses the same JNI ABI.
+
+## Not done yet
+
+- Cross-compile with the Android NDK (arm64-v8a, armeabi-v7a, x86_64) and run
+  on physical, non-rooted devices. Not possible in the current build
+  environment: no NDK.
+- Compile `JaySquadSecEngine.kt` in the Android project. No `kotlinc` was
+  available here; the JNI methods it wraps are tested from Java.
+- Return structured decisions and incident IDs instead of alert text.
+- Load verified rule updates through the bridge (the `apply` crate exists;
+  it isn't wired into the bridge yet).
+- Fuzz the C ABI and get an independent review of the unsafe code.
+- Keep alert-only as the default. Do not enable Android process killing or
+  arbitrary permission revocation, which ordinary apps cannot do.
