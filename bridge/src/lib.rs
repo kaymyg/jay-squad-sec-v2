@@ -6,9 +6,9 @@
 //! operations are internally serialized by a Mutex.
 
 use jay_squad_sec::engine::Engine;
-use jay_squad_sec::rtid::Rtid;
 use jay_squad_sec::event::EventKind;
-use jay_squad_sec_protocol::{validate, WireEvent, PROTOCOL_VERSION, MAX_DETAIL_LEN};
+use jay_squad_sec::rtid::Rtid;
+use jay_squad_sec_protocol::{validate, WireEvent, MAX_DETAIL_LEN, PROTOCOL_VERSION};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
@@ -34,27 +34,31 @@ pub struct JssEngine {
     state: Mutex<EngineState>,
 }
 
-/// Convert a caller-owned byte buffer to UTF-8 without allocating.
-/// The FFI caller must guarantee that a non-empty range is readable for the
-/// duration of the call. Length is checked before creating the slice.
+/// Copy a caller-owned byte buffer into an owned, validated UTF-8 String.
+/// Returning an owned value (inputs are bounded, so the copy is small) means
+/// no borrow of foreign memory can outlive this call. The FFI caller must
+/// guarantee that a non-empty range is readable for the duration of the call.
+/// Length is checked before the slice is created.
 unsafe fn bounded_utf8(
     ptr: *const u8,
     len: usize,
     max: usize,
     allow_empty: bool,
-) -> Result<&'a str, i32> {
+) -> Result<String, i32> {
     if len > max || (!allow_empty && len == 0) {
         return Err(ERR_INVALID);
     }
     if len == 0 {
-        return Ok("");
+        return Ok(String::new());
     }
     if ptr.is_null() {
         return Err(ERR_NULL);
     }
     // SAFETY: caller contract requires ptr..ptr+len to be readable.
     let bytes = unsafe { slice::from_raw_parts(ptr, len) };
-    str::from_utf8(bytes).map_err(|_| ERR_INVALID)
+    str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| ERR_INVALID)
 }
 
 /// Create an alert-only engine. Returns null if construction fails.
@@ -64,7 +68,10 @@ pub extern "C" fn jss_engine_new(boot_nonce: u64) -> *mut JssEngine {
         let mut engine = Engine::new(boot_nonce);
         engine.set_alert_only(true);
         Box::into_raw(Box::new(JssEngine {
-            state: Mutex::new(EngineState { engine, identities: HashMap::new() }),
+            state: Mutex::new(EngineState {
+                engine,
+                identities: HashMap::new(),
+            }),
         }))
     }) {
         Ok(p) => p,
@@ -120,15 +127,22 @@ pub unsafe extern "C" fn jss_engine_submit_event(
 
     match catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: buffer validity is part of this function's FFI contract.
-        let identity = unsafe { bounded_utf8(package_identity, package_identity_len, MAX_IDENTITY_LEN, false)? };
+        let identity = unsafe {
+            bounded_utf8(
+                package_identity,
+                package_identity_len,
+                MAX_IDENTITY_LEN,
+                false,
+            )?
+        };
         let kind = unsafe { bounded_utf8(kind, kind_len, MAX_KIND_LEN, false)? };
         let detail = unsafe { bounded_utf8(detail, detail_len, MAX_DETAIL_LEN, true)? };
 
         let wire = WireEvent {
             schema_version: PROTOCOL_VERSION,
             pid,
-            kind: kind.to_owned(),
-            detail: detail.to_owned(),
+            kind,
+            detail,
             at_ms,
         };
         let validated = validate(&wire).map_err(|_| ERR_INVALID)?;
@@ -140,7 +154,7 @@ pub unsafe extern "C" fn jss_engine_submit_event(
         let rtid = if let Some(existing) = guard.identities.get(&key) {
             *existing
         } else {
-            let created = guard.engine.adopt(identity, identity.as_bytes(), at_ms);
+            let created = guard.engine.adopt(&identity, identity.as_bytes(), at_ms);
             guard.identities.insert(key, created);
             created
         };

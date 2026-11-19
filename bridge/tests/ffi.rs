@@ -98,10 +98,29 @@ fn pid_reuse_uses_distinct_process_generations() {
     assert!(!handle.is_null());
     // SAFETY: all byte slices are valid for each synchronous call.
     unsafe {
-        assert_eq!(submit(handle, 42, 1, b"com.example.one", b"process_start", b""), 0);
-        assert_eq!(submit(handle, 42, 1, b"com.example.one", b"network_connect", b"one.test:443"), 0);
-        assert_eq!(submit(handle, 42, 1, b"com.example.one", b"process_exit", b""), 0);
-        assert_eq!(submit(handle, 42, 2, b"com.example.two", b"process_start", b""), 0);
+        assert_eq!(
+            submit(handle, 42, 1, b"com.example.one", b"process_start", b""),
+            0
+        );
+        assert_eq!(
+            submit(
+                handle,
+                42,
+                1,
+                b"com.example.one",
+                b"network_connect",
+                b"one.test:443"
+            ),
+            0
+        );
+        assert_eq!(
+            submit(handle, 42, 1, b"com.example.one", b"process_exit", b""),
+            0
+        );
+        assert_eq!(
+            submit(handle, 42, 2, b"com.example.two", b"process_start", b""),
+            0
+        );
         jss_engine_free(handle);
     }
 }
@@ -119,7 +138,14 @@ fn concurrent_submissions_are_serialized_by_the_handle_mutex() {
             // SAFETY: the main test retains the handle until all worker threads
             // join; each thread passes its own live input buffers.
             unsafe {
-                submit(handle, 100 + i, 1, b"com.example.concurrent", b"network_connect", detail.as_bytes())
+                submit(
+                    handle,
+                    100 + i,
+                    1,
+                    b"com.example.concurrent",
+                    b"network_connect",
+                    detail.as_bytes(),
+                )
             }
         }));
     }
