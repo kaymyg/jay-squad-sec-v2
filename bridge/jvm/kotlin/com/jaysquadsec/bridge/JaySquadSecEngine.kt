@@ -77,7 +77,7 @@ class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
             NativeBridge.ERR_UPDATE_NOT_CONFIGURED.toLong() ->
                 throw IllegalStateException("builder public key is not configured in this native build")
             NativeBridge.ERR_UPDATE_REJECTED.toLong() ->
-                throw SecurityException("signed rules update rejected; active rules unchanged")
+                throw SecurityException("signed rules update rejected; see takeAlerts() for the reason")
             NativeBridge.ERR_INVALID.toLong() ->
                 throw IllegalArgumentException("invalid update input")
             else -> throw IllegalStateException("rules update failed with code $result")

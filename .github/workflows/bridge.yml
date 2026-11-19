@@ -47,6 +47,12 @@ jobs:
           JSS_ANDROID_MIN_RULES_VERSION: "0"
           JSS_EXPECT_CONFIGURED_TESTS: "1"
         run: cargo test --manifest-path bridge/Cargo.toml --locked --test signed_updates_configured
+      - name: Fail-closed builds (key without minimum version, malformed key)
+        run: |
+          JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX=353c8a7feeca38b2c4536e0bd2586fdb18d070e50e059f1d43f8bfefb97a7ce1 \
+            cargo test --manifest-path bridge/Cargo.toml --locked --test signed_updates
+          JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX=not-a-valid-key JSS_ANDROID_MIN_RULES_VERSION=0 \
+            cargo test --manifest-path bridge/Cargo.toml --locked --test signed_updates
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
