@@ -1,0 +1,26 @@
+[package]
+name = "jay-squad-sec-update"
+version = "0.1.0"
+edition = "2021"
+description = "Signed-patch verification: the product accepts a patch only if it carries a valid ed25519 signature from the builder's key"
+
+# The ONE third-party dependency in the whole product, and only for the thing
+# that genuinely needs real asymmetric crypto: proving a patch came from the
+# builder and nobody else. ed25519-compact is pure Rust, ~no transitive deps,
+# by the author of libsodium — minimal supply-chain surface, which is the
+# point. Pinned to an exact version; verify Cargo.lock before every release.
+[lib]
+name = "jay_squad_sec_update"
+path = "src/lib.rs"
+
+[features]
+# Dev default includes signing so tests and the offline builder tool work.
+# The shipped product/Android build must use default-features = false:
+# verify-only, no signing code, no RNG — smallest footprint and no secret path.
+# Only `signing` pulls ed25519-compact's RNG (getrandom/libc); a verify-only
+# build drops those transitive deps entirely.
+default = ["signing"]
+signing = ["ed25519-compact/random"]
+
+[dependencies]
+ed25519-compact = { version = "=2.1.1", default-features = false, features = ["std"] }
