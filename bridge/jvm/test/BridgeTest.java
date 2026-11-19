@@ -49,6 +49,17 @@ public final class BridgeTest {
         run("abi version matches", () ->
             check(NativeBridge.nativeAbiVersion() == NativeBridge.EXPECTED_ABI, "abi"));
 
+        run("unconfigured builder key refuses rules updates", () -> {
+            long h = NativeBridge.nativeNew(7);
+            byte[] stateDir = utf8(System.getProperty("java.io.tmpdir") + "/jss-update-test");
+            check(NativeBridge.nativeLoadRules(h, stateDir) == -NativeBridge.ERR_UPDATE_NOT_CONFIGURED,
+                  "load must fail closed without an embedded builder key");
+            check(NativeBridge.nativeApplyRules(h, stateDir, new byte[] {1, 2, 3})
+                  == -NativeBridge.ERR_UPDATE_NOT_CONFIGURED,
+                  "apply must fail closed without an embedded builder key");
+            NativeBridge.nativeFree(h);
+        });
+
         run("detection flows out through JNI", () -> {
             long h = NativeBridge.nativeNew(7);
             check(h != 0, "new");
