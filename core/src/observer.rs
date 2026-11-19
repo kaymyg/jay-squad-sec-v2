@@ -57,13 +57,11 @@ impl AdaptiveObserver {
     /// Returns Some((old, new)) on transition.
     pub fn update(&mut self, score: f32) -> Option<(ObservationLevel, ObservationLevel)> {
         let target = raw_level(score);
-        let new = if target > self.level {
-            target // escalate immediately
-        } else if target < self.level && raw_level(score + DROP_MARGIN) < self.level {
-            target // de-escalate only once clearly below the boundary
-        } else {
-            self.level
-        };
+        // Escalate immediately; de-escalate only once clearly below the
+        // boundary (hysteresis), so the level does not flap around a threshold.
+        let escalate = target > self.level;
+        let deescalate = target < self.level && raw_level(score + DROP_MARGIN) < self.level;
+        let new = if escalate || deescalate { target } else { self.level };
         if new != self.level {
             let old = self.level;
             self.level = new;

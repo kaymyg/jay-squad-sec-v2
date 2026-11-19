@@ -11,9 +11,13 @@ use crate::capability::{CapabilityManager, Permission};
 use crate::event::{Event, EventBus, EventKind};
 use crate::observer::AdaptiveObserver;
 use crate::risk::{PolicyAction, RiskState};
+use crate::rules::{RulesConfig, RulesError, DEFAULT_RULES};
 use crate::rtid::{exe_hash, Rtid};
 use crate::vector::BehaviorVector;
-use std::collections::HashMap;
+// BTreeMap, not HashMap: HashMap iteration order is randomly seeded per
+// instance, which made per-tick decision/log order and the process listing
+// nondeterministic. Ordered by Rtid, every run is reproducible.
+use std::collections::BTreeMap;
 
 /// Audit ledger entry — only meaningful security decisions, never raw telemetry.
 #[derive(Clone, Debug)]
@@ -38,12 +42,15 @@ pub struct Engine {
     pub bus: EventBus,
     pub caps: CapabilityManager,
     pub audit: Vec<AuditEntry>,
-    procs: HashMap<Rtid, ProcessState>,
+    procs: BTreeMap<Rtid, ProcessState>,
     boot_nonce: u64,
     nonce_counter: u64,
     /// Alert-only: record and report decisions but never change process
     /// state or revoke leases. The safe default for a freshly deployed agent.
     alert_only: bool,
+    /// Installed detection rules. Starts as DEFAULT_RULES; replaced only via
+    /// set_rules with a config that has passed validation.
+    rules: RulesConfig,
 }
 
 impl Engine {
@@ -52,11 +59,25 @@ impl Engine {
             bus: EventBus::new(),
             caps: CapabilityManager::new(boot_nonce ^ 0xC0FFEE),
             audit: Vec::new(),
-            procs: HashMap::new(),
+            procs: BTreeMap::new(),
             boot_nonce,
             nonce_counter: 0,
             alert_only: false,
+            rules: DEFAULT_RULES,
         }
+    }
+
+    /// Install a new detection-rules config. Rejected (and the current rules
+    /// kept) unless it passes validation, so a bad config can never take effect.
+    pub fn set_rules(&mut self, rules: RulesConfig) -> Result<(), RulesError> {
+        rules.validate()?;
+        self.rules = rules;
+        Ok(())
+    }
+
+    /// The currently installed detection rules.
+    pub fn rules(&self) -> &RulesConfig {
+        &self.rules
     }
 
     pub fn set_alert_only(&mut self, on: bool) {
@@ -179,6 +200,9 @@ impl Engine {
     /// One engine cycle. Returns human-readable log lines for anything notable.
     pub fn tick(&mut self, now_ms: u64) -> Vec<String> {
         let mut log = Vec::new();
+        // Snapshot the installed rules for this tick (RulesConfig is Copy), so
+        // a whole tick is evaluated under one consistent rule set.
+        let rules = self.rules;
 
         // 1. Deliver a batch of normalized events.
         for ev in self.bus.drain_batch(256) {
@@ -192,7 +216,7 @@ impl Engine {
             p.last_vector_decay_ms = now_ms;
             p.vector.apply(ev.kind);
             // Risk update.
-            p.risk.absorb(ev.kind, now_ms);
+            p.risk.absorb_with(ev.kind, now_ms, &rules);
             if ev.kind == EventKind::ProcessExit {
                 p.alive = false; // RTID expires with the process
             }
@@ -202,14 +226,14 @@ impl Engine {
         let rtids: Vec<Rtid> = self.procs.keys().copied().collect();
         for rtid in rtids {
             let (name, score, transition, old_action, new_action) = {
-                let p = self.procs.get_mut(&rtid).unwrap();
+                let Some(p) = self.procs.get_mut(&rtid) else { continue };
                 if !p.alive {
                     continue;
                 }
-                p.risk.decay_to(now_ms);
+                p.risk.decay_to_with(now_ms, &rules);
                 let transition = p.observer.update(p.risk.score);
                 let old_action = p.action;
-                let new_action = p.risk.action();
+                let new_action = p.risk.action_with(&rules);
                 p.action = new_action;
                 (p.name.clone(), p.risk.score, transition, old_action, new_action)
             };

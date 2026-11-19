@@ -13,6 +13,7 @@ pub mod event;
 pub mod observer;
 pub mod risk;
 pub mod rtid;
+pub mod rules;
 pub mod sensor;
 pub mod telemetry;
 pub mod vector;

@@ -2,31 +2,18 @@
 //!
 //! Every event contributes weighted evidence. Scores decay unless reinforced.
 //! Thresholds map deterministically to policy actions — no ML in the loop.
+//!
+//! The weights, thresholds and half-life live in [`RulesConfig`] so a verified
+//! data-only update can retune them. The free functions and the plain
+//! `RiskState` methods use [`DEFAULT_RULES`] and behave exactly as before; the
+//! engine uses the `*_with` variants with its currently installed rules.
 
 use crate::event::EventKind;
+use crate::rules::{RulesConfig, DEFAULT_RULES};
 
-/// Risk half-life (simulated ms): unreinforced suspicion fades.
-const HALF_LIFE_MS: f32 = 30_000.0;
-
-/// Weighted evidence per event (straight from the architecture doc).
+/// Weighted evidence per event under the default rules (architecture doc).
 pub fn base_score(kind: EventKind) -> f32 {
-    use EventKind::*;
-    match kind {
-        UnsignedBinary => 15.0,
-        RwxAlloc => 25.0,
-        RemoteThreadInjection => 35.0,
-        CredentialAccess => 40.0,
-        UnsignedModuleLoad => 20.0,
-        PersistenceWrite => 15.0,
-        PrivilegeEscalation => 20.0,
-        NetworkConnect => 2.0,
-        FileWrite => 1.0,
-        SignedBinary => -10.0,
-        StableTick => -5.0,
-        TempExecution => 20.0,
-        DeletedExecutable => 30.0,
-        ProcessStart | ProcessExit => 0.0,
-    }
+    DEFAULT_RULES.weight(kind)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,20 +25,10 @@ pub enum PolicyAction {
     Block,    // >=100
 }
 
+/// Map a score to a policy action under the default rules. Fails closed: any
+/// non-finite score (NaN, +inf, -inf) is unevaluable and maps to Block.
 pub fn action_for(score: f32) -> PolicyAction {
-    // Any non-finite score (NaN, +inf, -inf) is unevaluable. NaN and -inf both
-    // compare false against every threshold below, so they used to fall through
-    // to Allow. A risk engine that cannot evaluate a score must fail closed.
-    if !score.is_finite() {
-        return PolicyAction::Block;
-    }
-    match score {
-        s if s >= 100.0 => PolicyAction::Block,
-        s if s >= 75.0 => PolicyAction::Suspend,
-        s if s >= 50.0 => PolicyAction::Restrict,
-        s if s >= 25.0 => PolicyAction::Monitor,
-        _ => PolicyAction::Allow,
-    }
+    DEFAULT_RULES.action_for(score)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,26 +42,44 @@ impl RiskState {
         Self { score: 0.0, last_ms: now_ms }
     }
 
-    /// Decay to `now`, floor at zero.
+    /// Decay to `now` under the default rules, floor at zero.
     pub fn decay_to(&mut self, now_ms: u64) {
+        self.decay_to_with(now_ms, &DEFAULT_RULES);
+    }
+
+    /// Decay to `now` using the given rules' half-life, floor at zero.
+    pub fn decay_to_with(&mut self, now_ms: u64, rules: &RulesConfig) {
         if now_ms > self.last_ms {
             let dt = (now_ms - self.last_ms) as f32;
-            self.score *= 0.5f32.powf(dt / HALF_LIFE_MS);
+            self.score *= 0.5f32.powf(dt / rules.half_life_ms);
             self.last_ms = now_ms;
         }
+        // Floor negatives only. A NaN is deliberately NOT scrubbed to 0: left as
+        // NaN it maps to Block (fail closed); scrubbing it would fail open.
         if self.score < 0.0 {
             self.score = 0.0;
         }
     }
 
-    /// Decay, then absorb one piece of evidence.
+    /// Decay, then absorb one piece of evidence (default rules).
     pub fn absorb(&mut self, kind: EventKind, now_ms: u64) {
-        self.decay_to(now_ms);
-        self.score = (self.score + base_score(kind)).max(0.0);
+        self.absorb_with(kind, now_ms, &DEFAULT_RULES);
     }
 
+    /// Decay, then absorb one piece of evidence using the given rules.
+    pub fn absorb_with(&mut self, kind: EventKind, now_ms: u64, rules: &RulesConfig) {
+        self.decay_to_with(now_ms, rules);
+        self.score = (self.score + rules.weight(kind)).max(0.0);
+    }
+
+    /// Current action under the default rules.
     pub fn action(&self) -> PolicyAction {
         action_for(self.score)
+    }
+
+    /// Current action under the given rules.
+    pub fn action_with(&self, rules: &RulesConfig) -> PolicyAction {
+        rules.action_for(self.score)
     }
 }
 
