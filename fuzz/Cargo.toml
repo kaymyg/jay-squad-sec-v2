@@ -1,0 +1,43 @@
+[package]
+name = "jay-squad-sec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+jay-squad-sec-core = { path = "../core" }
+
+[[bin]]
+name = "parse_proc_net_tcp"
+path = "fuzz_targets/parse_proc_net_tcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_tasklist_csv"
+path = "fuzz_targets/parse_tasklist_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_netstat"
+path = "fuzz_targets/parse_netstat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_reg_query"
+path = "fuzz_targets/parse_reg_query.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

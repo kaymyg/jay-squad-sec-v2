@@ -1,4 +1,5 @@
-/target
+# Build output of the root workspace and the standalone bridge/ and fuzz/ crates.
+target/
 # Cargo.lock IS committed: this workspace ships binaries and a security product
 # that must build reproducibly from pinned dependency versions (supply-chain
 # integrity). Do not re-add Cargo.lock to this ignore list.
