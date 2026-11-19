@@ -14,15 +14,34 @@ has no code-injection surface.
   is rejected by another (e.g. the desktop agent).
 - **No downgrade or replay.** A patch must be strictly newer than the
   installed version.
-- **Detection cannot be switched off by an update.** On-device validation
-  rejects any rules where a threat indicator weight is not positive, where a
-  high-volume neutral event (file writes, network connects, process start or
-  exit) is negative (that would let a process launder its own risk score), or
-  where thresholds are not finite and strictly increasing.
+- **Detection cannot be switched off by an update, even a validly signed
+  one.** On-device validation enforces semantic bounds, not just signs:
+  - threat indicators: weight in [1, 100] (none can be silenced);
+  - neutral high-volume events (file writes, network connects, process
+    start/exit): [0, 5] (no risk laundering, no mass false positives);
+  - good evidence (signed binary, stable tick): [-20, 0] (being signed cannot
+    cancel an injection + credential-theft chain);
+  - half-life in [10 s, 1 h];
+  - 5 <= monitor < restrict < suspend < block <= 400, each step at least 5;
+  - reachability: the five strongest indicators must sum to at least block_at.
+
+  A property test runs a full attack chain through the engine under defaults
+  and the most lenient configs validation accepts, and requires Block in every
+  case. The risk and observer functions also fail closed (NaN escalates to
+  Block / maximum observation) even when handed an unvalidated config.
 - **Tamper-evident installed state.** The installed state is the signed patch
   itself, re-verified on every load. Editing it on disk, or dropping in a file
-  signed by another key, has no effect: the product falls back to the previous
-  verified state, then to the compiled-in defaults.
+  signed by another key, has no effect. Both the current and previous state
+  are verified and the **highest verified version wins**, so swapping an older
+  genuine patch into the current slot does not downgrade the rules; falling
+  back to the previous state is reported as a possible-tampering warning.
+- **Hostile storage directory.** State paths must be regular files: symlinks,
+  FIFOs and directories are refused without being opened (no reading through a
+  planted link, no hang on a FIFO). Temp files are unique and created
+  exclusively, so a planted symlink cannot redirect a write elsewhere.
+- **Version floor.** Each build can set a minimum accepted rules version
+  (`MIN_RULES_VERSION` in the agent); patches below it are rejected and stored
+  states below it ignored.
 - **Crash safety.** Installs are atomic (temp file, fsync, rename, directory
   fsync). A crash leaves either the complete old state or the complete new one.
 - **Minimal footprint.** Shipped builds are verify-only: one external crate
@@ -38,12 +57,16 @@ It does not, on its own:
   app-hardening problem, tracked separately);
 - protect the private key itself: if the key leaks, an attacker can sign
   patches. Keep it offline and backed up securely;
-- stop a downgrade if an attacker can **delete** the app's state files: the
-  product reverts to compiled-in defaults (version 0), after which an older,
-  genuinely builder-signed patch could be re-applied. That can only install
-  rules the builder actually signed, all of which pass validation, but it is a
-  downgrade. Platform storage protection (Android app-private storage) is the
-  control here;
+- fully stop a downgrade by someone who can **delete or overwrite** files in
+  the state directory: removing the current state falls back one step to the
+  previous verified patch (with a tamper warning); removing both reverts to
+  compiled-in defaults. Every outcome is rules the builder actually signed,
+  all passing validation. `MIN_RULES_VERSION` bounds how far back this can go
+  (raise it each release); platform storage protection (Android app-private
+  storage) and a hardware-backed high-water mark (Android Keystore, planned)
+  are the remaining controls;
+- support two processes applying updates to one state directory at once
+  (applies are serialized within a process only);
 - replace independent security testing.
 
 ## Builder workflow (offline machine)
@@ -62,7 +85,8 @@ jaysec-rules export-defaults rules.txt
 $EDITOR rules.txt
 jaysec-rules compile rules.txt rules.bin
 
-# 3. Sign for a specific product and a strictly increasing version (>= 1).
+# 3. Sign for a specific product and a strictly increasing version
+#    (1 ..= 4294967295; the signer refuses anything else).
 jaysec-sign --key signing.key --product jay-squad-sec-agent \
             --version 1 --payload rules.bin --out rules-v1.jssp
 
