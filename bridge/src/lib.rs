@@ -74,10 +74,10 @@ pub extern "C" fn jss_engine_new(boot_nonce: u64) -> *mut JssEngine {
 
 /// Destroy a handle returned by jss_engine_new. Null is accepted.
 ///
-/// SAFETY CONTRACT: caller must pass a live handle returned by
-/// jss_engine_new exactly once and must prevent concurrent/in-flight calls.
-/// A raw-pointer ABI cannot make use-after-free or double-free safe for a
-/// caller that violates this ownership contract.
+/// # Safety
+/// The caller must pass a live handle returned by jss_engine_new exactly
+/// once and must prevent concurrent or in-flight calls. A raw-pointer ABI
+/// cannot make use-after-free or double-free safe when this contract is broken.
 #[no_mangle]
 pub unsafe extern "C" fn jss_engine_free(handle: *mut JssEngine) {
     if !handle.is_null() {
@@ -94,9 +94,10 @@ pub unsafe extern "C" fn jss_engine_free(handle: *mut JssEngine) {
 /// Return codes: 0 accepted; 1 null pointer; 2 invalid input; 3 panic;
 /// 4 poisoned engine mutex.
 ///
-/// SAFETY CONTRACT: handle must be live; every non-empty input buffer must be
-/// readable for its supplied length until this function returns. The caller
-/// must not free the handle concurrently with this call.
+/// # Safety
+/// `handle` must be a live handle returned by `jss_engine_new`. Every
+/// non-empty input buffer must be readable for its supplied length until this
+/// function returns. The caller must not free the handle concurrently.
 #[no_mangle]
 pub unsafe extern "C" fn jss_engine_submit_event(
     handle: *mut JssEngine,
