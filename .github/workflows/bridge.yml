@@ -28,10 +28,17 @@ jobs:
         with:
           toolchain: 1.75.0
           components: rustfmt, clippy
+      - name: Set up JDK for live JNI tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: Format bridge
         run: cargo fmt --manifest-path bridge/Cargo.toml -- --check
       - name: Test bridge
         run: cargo test --manifest-path bridge/Cargo.toml --locked
+      - name: Live JVM JNI tests
+        run: bash bridge/jvm/run-jvm-test.sh
       - name: Clippy bridge
         run: cargo clippy --manifest-path bridge/Cargo.toml --all-targets --locked -- -D warnings
       - name: Set up JDK
