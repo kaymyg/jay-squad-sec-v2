@@ -176,6 +176,12 @@ impl SignedPatch {
         if payload.len() as u64 != payload_len {
             return Err(UpdateError::MalformedPatchFile);
         }
+        // Defense-in-depth: reject an oversized payload here, before allocating
+        // a copy, rather than only later in Verifier::verify. payload is still
+        // just a borrowed slice at this point, so this check costs no alloc.
+        if payload.len() > DEFAULT_MAX_PAYLOAD {
+            return Err(UpdateError::MalformedPatchFile);
+        }
         Ok(SignedPatch {
             manifest: PatchManifest { schema_version, product_id, patch_version, payload_len },
             payload: payload.to_vec(),
