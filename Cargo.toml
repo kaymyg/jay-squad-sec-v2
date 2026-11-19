@@ -18,6 +18,7 @@
 resolver = "2"
 members = [
     "core",
+    "protocol",
     "apps/demo",
     "apps/agent",
 ]
