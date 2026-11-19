@@ -1,4 +1,6 @@
 /target
-Cargo.lock
+# Cargo.lock IS committed: this workspace ships binaries and a security product
+# that must build reproducibly from pinned dependency versions (supply-chain
+# integrity). Do not re-add Cargo.lock to this ignore list.
 jaysec_alerts.log
 *.log

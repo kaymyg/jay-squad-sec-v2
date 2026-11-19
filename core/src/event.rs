@@ -48,11 +48,22 @@ pub struct Event {
     pub detail: String,
 }
 
+/// Hard cap on queued events. Bounds memory on a device under an event flood
+/// and keeps the per-drain sort cost bounded. Tunable per deployment.
+pub const MAX_QUEUE: usize = 4096;
+
 /// Lightweight in-memory bus. Single-threaded in the prototype;
 /// production version wraps an mpsc/broadcast channel.
+///
+/// The queue is bounded: once full, a new event is admitted only if it is more
+/// severe than the least-severe event already queued (which it then evicts).
+/// This means a high-frequency flood of low-severity events cannot grow memory
+/// without bound, and cannot push critical evidence out of the queue. Every
+/// lost event is counted in `dropped` for telemetry.
 #[derive(Default)]
 pub struct EventBus {
     queue: VecDeque<Event>,
+    dropped: u64,
 }
 
 impl EventBus {
@@ -61,7 +72,40 @@ impl EventBus {
     }
 
     pub fn publish(&mut self, ev: Event) {
-        self.queue.push_back(ev);
+        if self.queue.len() < MAX_QUEUE {
+            self.queue.push_back(ev);
+            return;
+        }
+        // Full. The lowest severity tier is 0; a tier-0 event cannot beat the
+        // minimum, so drop it immediately without scanning (the common flood
+        // case, kept O(1)).
+        let incoming_sev = ev.kind.severity();
+        if incoming_sev == 0 {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        // Elevated event: evict the least-severe queued event if the newcomer
+        // outranks it; otherwise drop the newcomer. Either way exactly one
+        // event is lost. O(n), but only for the rare elevated-under-flood path.
+        if let Some((idx, min_sev)) = self
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i, e.kind.severity()))
+            .min_by_key(|&(_, s)| s)
+        {
+            if incoming_sev > min_sev {
+                self.queue.remove(idx);
+                self.queue.push_back(ev);
+            }
+        }
+        self.dropped = self.dropped.saturating_add(1);
+    }
+
+    /// Total events dropped because the queue was full. Exposed so the agent
+    /// can surface sensor overload rather than hiding it.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// Drain up to `max` events, highest severity first (stable within a tier).
@@ -114,5 +158,37 @@ mod tests {
         let batch = bus.drain_batch(3);
         assert_eq!(batch.len(), 3);
         assert_eq!(bus.len(), 2);
+    }
+
+    #[test]
+    fn flood_is_bounded_and_preserves_critical_evidence() {
+        let mut bus = EventBus::new();
+        // One piece of critical evidence arrives first.
+        bus.publish(ev(EventKind::CredentialAccess));
+        // Then a low-severity flood far beyond the cap.
+        for _ in 0..(MAX_QUEUE as u64 + 1_000) {
+            bus.publish(ev(EventKind::FileWrite));
+        }
+        assert!(bus.len() <= MAX_QUEUE, "queue must stay bounded under flood");
+        assert!(bus.dropped() >= 1_000, "overflow must be counted, not hidden");
+        // The critical event must survive the flood.
+        let batch = bus.drain_batch(MAX_QUEUE);
+        assert!(
+            batch.iter().any(|e| e.kind == EventKind::CredentialAccess),
+            "critical evidence must not be evicted by a low-severity flood"
+        );
+    }
+
+    #[test]
+    fn a_more_severe_event_evicts_a_less_severe_one_when_full() {
+        let mut bus = EventBus::new();
+        for _ in 0..MAX_QUEUE {
+            bus.publish(ev(EventKind::FileWrite)); // tier 0, fills the queue
+        }
+        assert_eq!(bus.len(), MAX_QUEUE);
+        bus.publish(ev(EventKind::CredentialAccess)); // tier 3, must get in
+        assert_eq!(bus.len(), MAX_QUEUE, "stays bounded");
+        let batch = bus.drain_batch(1); // highest severity first
+        assert_eq!(batch[0].kind, EventKind::CredentialAccess);
     }
 }

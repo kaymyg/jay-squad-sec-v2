@@ -59,7 +59,10 @@ impl CapabilityManager {
     ) -> Capability {
         let id = self.next_id;
         self.next_id += 1;
-        let expires_ms = now_ms + ttl_ms;
+        // saturating: a hostile or huge ttl must never overflow (debug panic /
+        // release wrap). Saturating to u64::MAX is a never-expiring lease,
+        // which `check` still evaluates safely.
+        let expires_ms = now_ms.saturating_add(ttl_ms);
         let sig = self.tag(id, rtid, perm, scope, expires_ms);
         let cap = Capability { id, rtid, perm, scope: scope.to_string(), expires_ms, sig };
         self.leases.entry(rtid).or_default().push(cap.clone());

@@ -11,27 +11,31 @@ lease expiry are deterministic and unit-testable.
 ## Run it
 
 ```
-cargo run                          # 60-second simulation: chrome vs escalating updater
-cargo test                         # 24 unit + integration tests
+cargo run --bin demo               # 60-second simulation: chrome vs escalating updater
+cargo test                         # 26 unit + integration tests
 cargo run --release --bin agent    # REAL monitoring, alert-only (see DEPLOY.md)
 ```
 
 Requires only stable Rust (1.75+). Zero dependencies.
 
+The engine is a reusable library crate in `core/` (library name `jay_squad_sec`);
+`apps/demo` and `apps/agent` are thin binaries that depend only on its public
+API, so platform-specific front ends cannot contaminate the shared engine.
+
 ## What maps to what
 
 | Architecture component      | File             | Prototype simplification                          |
 | --------------------------- | ---------------- | ------------------------------------------------- |
-| Runtime Identity (RTID)     | `src/rtid.rs`    | std SipHash instead of BLAKE3                     |
-| Event Bus                   | `src/event.rs`   | single-threaded VecDeque, severity-ordered drain  |
-| Behaviour Vector Engine     | `src/vector.rs`  | 6-axis f32 vector, 60 s half-life decay           |
-| Adaptive Observation Engine | `src/observer.rs`| L0–L4 from risk score, with drop hysteresis       |
-| Risk & Policy Engine        | `src/risk.rs`    | doc's exact weights/thresholds, 30 s half-life    |
-| Capability Manager          | `src/capability.rs` | keyed-hash MAC instead of ed25519              |
-| Kernel adapters             | `src/sensor.rs`  | scripted event timeline (demo)                    |
-| Userspace sensors (real)    | `src/telemetry.rs` | /proc (Linux); tasklist/netstat/reg/Authenticode (Windows) |
-| Agent (deployable)          | `src/bin/agent.rs` | alert-only loop, self-throttling               |
-| Security workflow wiring    | `src/engine.rs`  | tick loop + audit ledger (decisions only)         |
+| Runtime Identity (RTID)     | `core/src/rtid.rs`    | std SipHash instead of BLAKE3                |
+| Event Bus                   | `core/src/event.rs`   | single-threaded VecDeque, severity-ordered drain |
+| Behaviour Vector Engine     | `core/src/vector.rs`  | 6-axis f32 vector, 60 s half-life decay      |
+| Adaptive Observation Engine | `core/src/observer.rs`| L0–L4 from risk score, with drop hysteresis  |
+| Risk & Policy Engine        | `core/src/risk.rs`    | doc's exact weights/thresholds, 30 s half-life |
+| Capability Manager          | `core/src/capability.rs` | keyed-hash MAC instead of ed25519         |
+| Kernel adapters             | `core/src/sensor.rs`  | scripted event timeline (demo)               |
+| Userspace sensors (real)    | `core/src/telemetry.rs` | /proc (Linux); tasklist/netstat/reg/Authenticode (Windows) |
+| Agent (deployable)          | `apps/agent/src/main.rs` | alert-only loop, self-throttling          |
+| Security workflow wiring    | `core/src/engine.rs`  | tick loop + audit ledger (decisions only)    |
 
 ## What the demo shows
 
@@ -63,7 +67,7 @@ one-off anomaly de-escalates instead of poisoning a process forever —
 
 ## Suggested learning path from here
 
-1. Play with the weights in `risk.rs` and the scenario in `main.rs`; watch how
+1. Play with the weights in `core/src/risk.rs` and the scenario in `apps/demo/src/main.rs`; watch how
    half-life vs event spacing changes outcomes (an attacker who goes *slow
    enough* never crosses Monitor — that's the classic low-and-slow evasion,
    and why the doc's behaviour vectors matter, since they decay slower).

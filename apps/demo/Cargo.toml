@@ -1,0 +1,12 @@
+[package]
+name = "jay-squad-sec-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Scripted 60-second simulation demonstrating the Jay Squad Sec engine"
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[dependencies]
+jay-squad-sec-core = { path = "../../core" }
