@@ -43,7 +43,7 @@ pub struct PatchManifest {
 
 /// A patch as delivered: manifest, payload bytes, and the detached signature
 /// over `DOMAIN || manifest || payload`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedPatch {
     pub manifest: PatchManifest,
     pub payload: Vec<u8>,
@@ -77,6 +77,9 @@ pub enum UpdateError {
     /// Signature was valid but the patch is not newer than what is installed
     /// (replay / downgrade attempt).
     Rollback { got: u64, current: u64 },
+    /// A patch file could not be decoded (bad magic, wrong format version,
+    /// truncated, inconsistent lengths, or non-UTF-8 product id).
+    MalformedPatchFile,
 }
 
 impl core::fmt::Display for UpdateError {
@@ -95,11 +98,101 @@ impl core::fmt::Display for UpdateError {
             UpdateError::Rollback { got, current } => {
                 write!(f, "patch version {got} is not newer than installed {current}")
             }
+            UpdateError::MalformedPatchFile => write!(f, "patch file is malformed"),
         }
     }
 }
 
 impl std::error::Error for UpdateError {}
+
+/// Magic bytes at the start of an encoded patch file.
+pub const PATCH_MAGIC: &[u8; 4] = b"JSSP";
+/// On-disk patch container format version (distinct from the signed schema).
+pub const PATCH_FORMAT_VERSION: u16 = 1;
+
+/// Minimal bounds-checked reader for decoding; never panics or over-reads.
+struct Cursor<'a> {
+    b: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], UpdateError> {
+        let end = self.pos.checked_add(n).ok_or(UpdateError::MalformedPatchFile)?;
+        if end > self.b.len() {
+            return Err(UpdateError::MalformedPatchFile);
+        }
+        let s = &self.b[self.pos..end];
+        self.pos = end;
+        Ok(s)
+    }
+    fn rest(&self) -> &'a [u8] {
+        &self.b[self.pos..]
+    }
+}
+
+impl SignedPatch {
+    /// Serialize to the on-disk patch container (little-endian, zero-dependency):
+    /// `magic | format_version | schema_version | pid_len | pid | patch_version
+    /// | payload_len | signature(64) | payload`.
+    pub fn encode(&self) -> Vec<u8> {
+        let pid = self.manifest.product_id.as_bytes();
+        let mut b = Vec::with_capacity(26 + pid.len() + 64 + self.payload.len());
+        b.extend_from_slice(PATCH_MAGIC);
+        b.extend_from_slice(&PATCH_FORMAT_VERSION.to_le_bytes());
+        b.extend_from_slice(&self.manifest.schema_version.to_le_bytes());
+        b.extend_from_slice(&(pid.len() as u32).to_le_bytes());
+        b.extend_from_slice(pid);
+        b.extend_from_slice(&self.manifest.patch_version.to_le_bytes());
+        b.extend_from_slice(&self.manifest.payload_len.to_le_bytes());
+        b.extend_from_slice(&self.signature);
+        b.extend_from_slice(&self.payload);
+        b
+    }
+
+    /// Decode a patch container. Fully bounds-checked: any truncation, bad
+    /// magic/version, length inconsistency or non-UTF-8 product id is rejected
+    /// as [`UpdateError::MalformedPatchFile`] without panicking. Decoding does
+    /// NOT verify the signature; pass the result to [`Verifier::verify`].
+    pub fn decode(bytes: &[u8]) -> Result<SignedPatch, UpdateError> {
+        let mut c = Cursor { b: bytes, pos: 0 };
+        if c.take(4)? != PATCH_MAGIC {
+            return Err(UpdateError::MalformedPatchFile);
+        }
+        let fmt = u16::from_le_bytes(c.take(2)?.try_into().unwrap());
+        if fmt != PATCH_FORMAT_VERSION {
+            return Err(UpdateError::MalformedPatchFile);
+        }
+        let schema_version = u32::from_le_bytes(c.take(4)?.try_into().unwrap());
+        let pid_len = u32::from_le_bytes(c.take(4)?.try_into().unwrap()) as usize;
+        let pid_bytes = c.take(pid_len)?; // take() bounds pid_len to the buffer
+        let product_id = core::str::from_utf8(pid_bytes)
+            .map_err(|_| UpdateError::MalformedPatchFile)?
+            .to_owned();
+        let patch_version = u64::from_le_bytes(c.take(8)?.try_into().unwrap());
+        let payload_len = u64::from_le_bytes(c.take(8)?.try_into().unwrap());
+        let signature: [u8; 64] = c.take(64)?.try_into().unwrap();
+        let payload = c.rest();
+        if payload.len() as u64 != payload_len {
+            return Err(UpdateError::MalformedPatchFile);
+        }
+        Ok(SignedPatch {
+            manifest: PatchManifest { schema_version, product_id, patch_version, payload_len },
+            payload: payload.to_vec(),
+            signature,
+        })
+    }
+}
+
+/// Generate a fresh ed25519 keypair as `(public_key, secret_key)` raw bytes.
+/// Builder-side only (behind the `signing` feature); the secret key must be
+/// kept offline and never shipped. The public key is what you embed in the app.
+#[cfg(feature = "signing")]
+pub fn generate_keypair() -> ([u8; 32], [u8; 64]) {
+    use ed25519_compact::KeyPair;
+    let kp = KeyPair::generate();
+    (*kp.pk, *kp.sk)
+}
 
 /// Canonical, deterministic byte layout that gets signed and verified. Length
 /// prefixes make the encoding unambiguous (no field-boundary confusion).
@@ -206,6 +299,57 @@ pub fn sign_patch(
     let mut signature = [0u8; 64];
     signature.copy_from_slice(sig.as_ref());
     Ok(SignedPatch { manifest, payload, signature })
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+
+    fn sample() -> SignedPatch {
+        SignedPatch {
+            manifest: PatchManifest {
+                schema_version: PATCH_SCHEMA_VERSION,
+                product_id: "jay-squad-sec-android".into(),
+                patch_version: 7,
+                payload_len: 5,
+            },
+            payload: vec![1, 2, 3, 4, 5],
+            signature: [9u8; 64],
+        }
+    }
+
+    #[test]
+    fn encode_decode_round_trips() {
+        let p = sample();
+        let back = SignedPatch::decode(&p.encode()).expect("round trip");
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn truncation_at_any_length_is_rejected_without_panic() {
+        let bytes = sample().encode();
+        for cut in 0..bytes.len() {
+            assert!(SignedPatch::decode(&bytes[..cut]).is_err(), "cut at {cut} must fail");
+        }
+    }
+
+    #[test]
+    fn bad_magic_and_version_are_rejected() {
+        let mut bad_magic = sample().encode();
+        bad_magic[0] = b'X';
+        assert_eq!(SignedPatch::decode(&bad_magic), Err(UpdateError::MalformedPatchFile));
+
+        let mut bad_ver = sample().encode();
+        bad_ver[4] = 0xFF; // format version byte
+        assert_eq!(SignedPatch::decode(&bad_ver), Err(UpdateError::MalformedPatchFile));
+    }
+
+    #[test]
+    fn payload_length_mismatch_is_rejected() {
+        let mut extra = sample().encode();
+        extra.push(0xFF); // one trailing byte: payload longer than payload_len
+        assert_eq!(SignedPatch::decode(&extra), Err(UpdateError::MalformedPatchFile));
+    }
 }
 
 #[cfg(all(test, feature = "signing"))]
