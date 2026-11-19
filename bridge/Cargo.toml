@@ -1,3 +1,8 @@
+# Standalone workspace: the bridge is deliberately kept out of the root
+# workspace until its pointer/lifecycle/concurrency contracts are hardened for
+# Android. The empty [workspace] table makes it build on its own.
+[workspace]
+
 [package]
 name = "jay-squad-sec-bridge"
 version = "0.1.0"
