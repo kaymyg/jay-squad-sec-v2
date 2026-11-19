@@ -1,4 +1,4 @@
-# Android bridge (ABI v3)
+# Android bridge (ABI v4)
 
 The boundary between the Android app and the Rust security engine. It has
 two front doors over one implementation:
@@ -119,10 +119,15 @@ The Android product identity is fixed to
 `jay-squad-sec-android`. The native bridge embeds its builder public key at
 compile time through `JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX` (exactly 64 hex
 characters). If the key is missing or malformed, both update operations fail
-closed with `ERR_UPDATE_NOT_CONFIGURED`. The optional
-`JSS_ANDROID_MIN_RULES_VERSION` compile-time setting establishes the
-minimum accepted patch version; production releases must set this to the
-minimum rules version they intend to support, rather than relying on 0.
+closed with `ERR_UPDATE_NOT_CONFIGURED`. `JSS_ANDROID_MIN_RULES_VERSION`
+is required whenever a key is embedded: a build with a key but no explicit
+minimum version also fails closed, so a release cannot ship with an
+accidental floor of 0. Set it to the lowest rules version that release will
+accept. The storage directory must be an absolute path (use
+`Context.getFilesDir()`); a relative path returns `ERR_INVALID`.
+
+Rejections return `ERR_UPDATE_REJECTED` and queue an alert naming the reason
+(bad signature, wrong product, rollback, below minimum, unsafe rules).
 
 The update payload is decoded as `RulesConfig` and fully validated by the
 core before installation and again before activation. The patch container is
@@ -130,6 +135,13 @@ Ed25519-verified for the Android product ID, checked against the installed
 version and minimum version, then persisted atomically by `apply`. No dynamic
 library, executable, script, bytecode or arbitrary code is accepted. Rejected
 patches leave the active rules unchanged and produce an alert.
+
+Testing: `tests/signed_updates_configured.rs` builds the bridge with a
+published TEST-ONLY key (seed `[0x4a; 32]`) and checks that a genuine patch
+installs, activates and survives a restart, and that forged, wrong-product,
+rollback and detection-disabling patches are refused. CI sets
+`JSS_EXPECT_CONFIGURED_TESTS=1` so these fail instead of skipping if the key
+is not embedded. Never embed the test key in a release build.
 
 Builder workflow: sign rules with product ID `jay-squad-sec-android`, not
 `jay-squad-sec-agent`. Keep the signing private key offline. Embed only the
@@ -143,8 +155,6 @@ matching public key in the Android native release build.
 - Compile `JaySquadSecEngine.kt` in the Android project. No `kotlinc` was
   available here; the JNI methods it wraps are tested from Java.
 - Return structured decisions and incident IDs instead of alert text.
-- Load verified rule updates through the bridge (the `apply` crate exists;
-  it isn't wired into the bridge yet).
 - Fuzz the C ABI and get an independent review of the unsafe code.
 - Keep alert-only as the default. Do not enable Android process killing or
   arbitrary permission revocation, which ordinary apps cannot do.
