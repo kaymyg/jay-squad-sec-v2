@@ -5,14 +5,21 @@
 //!
 //! Every config is validated before it can be installed, and validation is
 //! deliberately opinionated: an update may *retune* detection but may not
-//! *disable* it. Concretely:
-//! - threat indicators (injection, credential access, …) must keep a positive
-//!   weight, so a patch cannot zero out a detection;
-//! - high-volume neutral events (file writes, network connects, process
-//!   start/exit) must not be negative, or a process could launder its own risk
-//!   score down by spamming them;
-//! - good-evidence events (signed binary, stable tick) must not be positive;
-//! - thresholds must be finite and strictly increasing.
+//! *disable* it, and may not turn ordinary activity into mass false positives.
+//! Bounds are semantic, not just sign checks (a review showed legal-but-absurd
+//! values such as `1e-45` weights or a block threshold of 10000 could make a
+//! full attack chain score Allow):
+//! - threat indicators: weight in [1, 100], so no indicator can be silenced;
+//! - neutral high-volume events (file writes, network connects, process
+//!   start/exit): weight in [0, 5]: never negative (that would let a process
+//!   launder its own risk by spamming them), never large (mass false positives);
+//! - good evidence (signed binary, stable tick): weight in [-20, 0], so being
+//!   signed cannot cancel out an injection + credential-theft chain;
+//! - half-life in [10 s, 1 h]: suspicion can neither evaporate between steps
+//!   of an attack nor linger forever;
+//! - thresholds: monitor_at >= 5, block_at <= 400, each step >= 5 apart;
+//! - reachability: the five strongest indicators together must reach
+//!   block_at, so Block can never be made unreachable.
 //!
 //! [`DEFAULT_RULES`] reproduces the original hard-coded engine values exactly,
 //! so behaviour is unchanged until a verified patch says otherwise.
@@ -89,10 +96,22 @@ fn class(k: EventKind) -> WeightClass {
 }
 
 /// Bounds enforced by [`RulesConfig::validate`].
-pub const MIN_HALF_LIFE_MS: f32 = 1_000.0; // 1 second
-pub const MAX_HALF_LIFE_MS: f32 = 86_400_000.0; // 1 day
-pub const MAX_ABS_WEIGHT: f32 = 100.0;
-pub const MAX_THRESHOLD: f32 = 10_000.0;
+pub const MIN_HALF_LIFE_MS: f32 = 10_000.0; // 10 seconds
+pub const MAX_HALF_LIFE_MS: f32 = 3_600_000.0; // 1 hour
+/// Threat-indicator weight range.
+pub const INDICATOR_WEIGHT: (f32, f32) = (1.0, 100.0);
+/// Neutral high-volume event weight range.
+pub const NEUTRAL_WEIGHT: (f32, f32) = (0.0, 5.0);
+/// Good-evidence weight range.
+pub const GOOD_EVIDENCE_WEIGHT: (f32, f32) = (-20.0, 0.0);
+/// Lowest allowed monitor threshold.
+pub const MIN_THRESHOLD: f32 = 5.0;
+/// Highest allowed block threshold.
+pub const MAX_THRESHOLD: f32 = 400.0;
+/// Minimum gap between consecutive thresholds.
+pub const MIN_THRESHOLD_GAP: f32 = 5.0;
+/// How many of the strongest indicators must together reach block_at.
+pub const REACHABILITY_INDICATORS: usize = 5;
 
 /// The tunable parameters of the risk engine.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,15 +166,17 @@ pub enum RulesError {
     /// A value was NaN or infinite.
     NonFinite,
     HalfLifeOutOfRange,
-    WeightOutOfRange(EventKind),
-    /// A threat indicator was given a weight <= 0 (would disable detection).
-    IndicatorNotPositive(EventKind),
-    /// A neutral high-volume event was given a negative weight (risk laundering).
-    NeutralNegative(EventKind),
-    /// A good-evidence event was given a positive weight.
-    GoodEvidencePositive(EventKind),
-    /// Thresholds were not 0 < monitor < restrict < suspend < block <= max.
+    /// A threat indicator's weight was outside [1, 100] (could silence it).
+    IndicatorOutOfRange(EventKind),
+    /// A neutral event's weight was outside [0, 5] (risk laundering if
+    /// negative, mass false positives if large).
+    NeutralOutOfRange(EventKind),
+    /// A good-evidence event's weight was outside [-20, 0].
+    GoodEvidenceOutOfRange(EventKind),
+    /// Thresholds were out of range, out of order, or too close together.
     ThresholdsInvalid,
+    /// The strongest indicators combined cannot reach block_at.
+    BlockUnreachable,
 }
 
 impl core::fmt::Display for RulesError {
@@ -167,21 +188,28 @@ impl core::fmt::Display for RulesError {
                 f,
                 "half-life must be within {MIN_HALF_LIFE_MS}..={MAX_HALF_LIFE_MS} ms"
             ),
-            RulesError::WeightOutOfRange(k) => {
-                write!(f, "weight for {k:?} exceeds ±{MAX_ABS_WEIGHT}")
-            }
-            RulesError::IndicatorNotPositive(k) => {
-                write!(f, "threat indicator {k:?} must keep a positive weight")
-            }
-            RulesError::NeutralNegative(k) => {
-                write!(f, "neutral event {k:?} must not have a negative weight")
-            }
-            RulesError::GoodEvidencePositive(k) => {
-                write!(f, "good-evidence event {k:?} must not have a positive weight")
-            }
+            RulesError::IndicatorOutOfRange(k) => write!(
+                f,
+                "threat indicator {k:?} must keep a weight in [{}, {}] (it cannot be silenced)",
+                INDICATOR_WEIGHT.0, INDICATOR_WEIGHT.1
+            ),
+            RulesError::NeutralOutOfRange(k) => write!(
+                f,
+                "neutral event {k:?} must have a weight in [{}, {}]",
+                NEUTRAL_WEIGHT.0, NEUTRAL_WEIGHT.1
+            ),
+            RulesError::GoodEvidenceOutOfRange(k) => write!(
+                f,
+                "good-evidence event {k:?} must have a weight in [{}, {}]",
+                GOOD_EVIDENCE_WEIGHT.0, GOOD_EVIDENCE_WEIGHT.1
+            ),
             RulesError::ThresholdsInvalid => write!(
                 f,
-                "thresholds must satisfy 0 < monitor < restrict < suspend < block <= {MAX_THRESHOLD}"
+                "thresholds must satisfy {MIN_THRESHOLD} <= monitor < restrict < suspend < block <= {MAX_THRESHOLD}, each at least {MIN_THRESHOLD_GAP} apart"
+            ),
+            RulesError::BlockUnreachable => write!(
+                f,
+                "block_at is unreachable: the {REACHABILITY_INDICATORS} strongest indicators must sum to at least block_at"
             ),
         }
     }
@@ -202,19 +230,19 @@ impl RulesConfig {
         self.weights[kind_index(k)]
     }
 
-    /// Map a score to a policy action. Fails closed: any non-finite score
-    /// is unevaluable and maps to Block.
+    /// Map a score to a policy action. Fails closed in every unevaluable
+    /// case: a non-finite score maps to Block, and comparisons are written as
+    /// `!(score < threshold)` so a NaN threshold (only possible in an
+    /// unvalidated config) escalates instead of falling through to Allow.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // deliberate: `!(x < t)` is true for NaN, so NaN escalates (fail closed)
     pub fn action_for(&self, score: f32) -> PolicyAction {
-        if !score.is_finite() {
-            return PolicyAction::Block;
-        }
-        if score >= self.block_at {
+        if !score.is_finite() || !(score < self.block_at) {
             PolicyAction::Block
-        } else if score >= self.suspend_at {
+        } else if !(score < self.suspend_at) {
             PolicyAction::Suspend
-        } else if score >= self.restrict_at {
+        } else if !(score < self.restrict_at) {
             PolicyAction::Restrict
-        } else if score >= self.monitor_at {
+        } else if !(score < self.monitor_at) {
             PolicyAction::Monitor
         } else {
             PolicyAction::Allow
@@ -233,23 +261,40 @@ impl RulesConfig {
         if !(MIN_HALF_LIFE_MS..=MAX_HALF_LIFE_MS).contains(&self.half_life_ms) {
             return Err(RulesError::HalfLifeOutOfRange);
         }
+        let within = |w: f32, (lo, hi): (f32, f32)| (lo..=hi).contains(&w);
+        let mut indicators = Vec::with_capacity(KIND_COUNT);
         for k in KINDS {
             let w = self.weight(k);
-            if w.abs() > MAX_ABS_WEIGHT {
-                return Err(RulesError::WeightOutOfRange(k));
-            }
             match class(k) {
-                WeightClass::Indicator if w <= 0.0 => return Err(RulesError::IndicatorNotPositive(k)),
-                WeightClass::Neutral if w < 0.0 => return Err(RulesError::NeutralNegative(k)),
-                WeightClass::GoodEvidence if w > 0.0 => {
-                    return Err(RulesError::GoodEvidencePositive(k))
+                WeightClass::Indicator => {
+                    if !within(w, INDICATOR_WEIGHT) {
+                        return Err(RulesError::IndicatorOutOfRange(k));
+                    }
+                    indicators.push(w);
+                }
+                WeightClass::Neutral if !within(w, NEUTRAL_WEIGHT) => {
+                    return Err(RulesError::NeutralOutOfRange(k))
+                }
+                WeightClass::GoodEvidence if !within(w, GOOD_EVIDENCE_WEIGHT) => {
+                    return Err(RulesError::GoodEvidenceOutOfRange(k))
                 }
                 _ => {}
             }
         }
-        let ordered = 0.0 < t[0] && t[0] < t[1] && t[1] < t[2] && t[2] < t[3] && t[3] <= MAX_THRESHOLD;
+        let gap_ok = |a: f32, b: f32| b - a >= MIN_THRESHOLD_GAP;
+        let ordered = t[0] >= MIN_THRESHOLD
+            && gap_ok(t[0], t[1])
+            && gap_ok(t[1], t[2])
+            && gap_ok(t[2], t[3])
+            && t[3] <= MAX_THRESHOLD;
         if !ordered {
             return Err(RulesError::ThresholdsInvalid);
+        }
+        // All values are finite here, so this sort cannot see a NaN.
+        indicators.sort_by(|a, b| b.partial_cmp(a).unwrap_or(core::cmp::Ordering::Equal));
+        let strongest: f32 = indicators.iter().take(REACHABILITY_INDICATORS).sum();
+        if strongest < self.block_at {
+            return Err(RulesError::BlockUnreachable);
         }
         Ok(())
     }
@@ -350,7 +395,7 @@ mod tests {
         r.weights[kind_index(EventKind::CredentialAccess)] = 0.0;
         assert_eq!(
             r.validate(),
-            Err(RulesError::IndicatorNotPositive(EventKind::CredentialAccess))
+            Err(RulesError::IndicatorOutOfRange(EventKind::CredentialAccess))
         );
     }
 
@@ -358,14 +403,14 @@ mod tests {
     fn a_patch_cannot_enable_risk_laundering() {
         let mut r = DEFAULT_RULES;
         r.weights[kind_index(EventKind::FileWrite)] = -1.0;
-        assert_eq!(r.validate(), Err(RulesError::NeutralNegative(EventKind::FileWrite)));
+        assert_eq!(r.validate(), Err(RulesError::NeutralOutOfRange(EventKind::FileWrite)));
     }
 
     #[test]
     fn good_evidence_cannot_become_suspicious() {
         let mut r = DEFAULT_RULES;
         r.weights[kind_index(EventKind::StableTick)] = 5.0;
-        assert_eq!(r.validate(), Err(RulesError::GoodEvidencePositive(EventKind::StableTick)));
+        assert_eq!(r.validate(), Err(RulesError::GoodEvidenceOutOfRange(EventKind::StableTick)));
     }
 
     #[test]
@@ -388,7 +433,60 @@ mod tests {
         assert_eq!(r.validate(), Err(RulesError::HalfLifeOutOfRange));
         let mut r = DEFAULT_RULES;
         r.weights[kind_index(EventKind::RwxAlloc)] = 1_000.0;
-        assert_eq!(r.validate(), Err(RulesError::WeightOutOfRange(EventKind::RwxAlloc)));
+        assert_eq!(r.validate(), Err(RulesError::IndicatorOutOfRange(EventKind::RwxAlloc)));
+    }
+
+    /// Each of these was a *legal* config before semantic bounds were added,
+    /// and each let a full attack chain score Allow (found in review).
+    #[test]
+    fn review_attack_configs_are_all_rejected() {
+        let mut r = DEFAULT_RULES; // Block pushed out of reach
+        r.monitor_at = 9997.0; r.restrict_at = 9998.0; r.suspend_at = 9999.0; r.block_at = 10_000.0;
+        assert_eq!(r.validate(), Err(RulesError::ThresholdsInvalid));
+
+        let mut r = DEFAULT_RULES; // subnormal indicator weights
+        for k in KINDS { if class(k) == WeightClass::Indicator { r.weights[kind_index(k)] = 1e-45; } }
+        assert!(matches!(r.validate(), Err(RulesError::IndicatorOutOfRange(_))));
+
+        let mut r = DEFAULT_RULES; // being signed cancels an injection chain
+        r.weights[kind_index(EventKind::SignedBinary)] = -100.0;
+        assert_eq!(r.validate(), Err(RulesError::GoodEvidenceOutOfRange(EventKind::SignedBinary)));
+
+        let mut r = DEFAULT_RULES; // suspicion evaporates between attack steps
+        r.half_life_ms = 1_000.0;
+        assert_eq!(r.validate(), Err(RulesError::HalfLifeOutOfRange));
+
+        let mut r = DEFAULT_RULES; // every networked app blocked
+        r.weights[kind_index(EventKind::NetworkConnect)] = 100.0;
+        assert_eq!(r.validate(), Err(RulesError::NeutralOutOfRange(EventKind::NetworkConnect)));
+
+        let mut r = DEFAULT_RULES; // everything monitored
+        r.monitor_at = 1e-45;
+        assert_eq!(r.validate(), Err(RulesError::ThresholdsInvalid));
+    }
+
+    #[test]
+    fn block_must_stay_reachable() {
+        let mut r = DEFAULT_RULES; // defaults: five strongest sum to 150
+        r.block_at = 150.0;
+        assert_eq!(r.validate(), Ok(()));
+        r.block_at = 160.0;
+        assert_eq!(r.validate(), Err(RulesError::BlockUnreachable));
+    }
+
+    #[test]
+    fn thresholds_too_close_together_are_rejected() {
+        let mut r = DEFAULT_RULES;
+        r.restrict_at = r.monitor_at + 1.0;
+        assert_eq!(r.validate(), Err(RulesError::ThresholdsInvalid));
+    }
+
+    #[test]
+    fn unvalidated_nan_thresholds_still_fail_closed() {
+        let mut r = DEFAULT_RULES;
+        r.block_at = f32::NAN; r.suspend_at = f32::NAN; r.restrict_at = f32::NAN; r.monitor_at = f32::NAN;
+        assert_eq!(r.action_for(1.0), PolicyAction::Block);
+        assert_eq!(r.action_for(1_000_000.0), PolicyAction::Block);
     }
 
     /// Deterministic fuzz-style pass: decode must never panic on any

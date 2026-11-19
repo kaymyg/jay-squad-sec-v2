@@ -3,6 +3,13 @@
 //! Observation depth follows behaviour, not reputation. Levels rise fast and
 //! fall with hysteresis (dropping requires a lower score than rising did),
 //! so a process can't flap between telemetry depths.
+//!
+//! Level boundaries follow the installed rules, so a patched policy and the
+//! observation depth never disagree: L2/L3/L4 start at monitor/restrict/
+//! suspend, and L1 at two fifths of monitor (richer metadata before any policy
+//! action). With DEFAULT_RULES this is exactly the original 10/25/50/75.
+
+use crate::rules::{RulesConfig, DEFAULT_RULES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ObservationLevel {
@@ -25,18 +32,22 @@ impl ObservationLevel {
     }
 }
 
-fn raw_level(score: f32) -> ObservationLevel {
-    // A non-finite score is unevaluable; observe at maximum depth rather than
-    // falling through to L0, mirroring the risk engine's fail-closed stance.
-    if !score.is_finite() {
-        return ObservationLevel::L4Containment;
-    }
-    match score {
-        s if s >= 75.0 => ObservationLevel::L4Containment,
-        s if s >= 50.0 => ObservationLevel::L3DeepCorrelation,
-        s if s >= 25.0 => ObservationLevel::L2BehaviourMonitoring,
-        s if s >= 10.0 => ObservationLevel::L1BehaviourMetadata,
-        _ => ObservationLevel::L0MinimalMetadata,
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // deliberate: `!(x < t)` is true for NaN, so NaN escalates (fail closed)
+fn raw_level(score: f32, rules: &RulesConfig) -> ObservationLevel {
+    // Fail closed: a non-finite score (or a NaN threshold in an unvalidated
+    // config) observes at maximum depth rather than falling through to L0.
+    // Comparisons are `!(score < t)` so NaN escalates.
+    let l1_at = rules.monitor_at * 2.0 / 5.0;
+    if !score.is_finite() || !(score < rules.suspend_at) {
+        ObservationLevel::L4Containment
+    } else if !(score < rules.restrict_at) {
+        ObservationLevel::L3DeepCorrelation
+    } else if !(score < rules.monitor_at) {
+        ObservationLevel::L2BehaviourMonitoring
+    } else if !(score < l1_at) {
+        ObservationLevel::L1BehaviourMetadata
+    } else {
+        ObservationLevel::L0MinimalMetadata
     }
 }
 
@@ -54,13 +65,23 @@ impl AdaptiveObserver {
         Self { level: ObservationLevel::L0MinimalMetadata }
     }
 
-    /// Returns Some((old, new)) on transition.
+    /// Returns Some((old, new)) on transition. Uses the default rules.
     pub fn update(&mut self, score: f32) -> Option<(ObservationLevel, ObservationLevel)> {
-        let target = raw_level(score);
+        self.update_with(score, &DEFAULT_RULES)
+    }
+
+    /// Returns Some((old, new)) on transition, with level boundaries taken
+    /// from the given (installed) rules.
+    pub fn update_with(
+        &mut self,
+        score: f32,
+        rules: &RulesConfig,
+    ) -> Option<(ObservationLevel, ObservationLevel)> {
+        let target = raw_level(score, rules);
         // Escalate immediately; de-escalate only once clearly below the
         // boundary (hysteresis), so the level does not flap around a threshold.
         let escalate = target > self.level;
-        let deescalate = target < self.level && raw_level(score + DROP_MARGIN) < self.level;
+        let deescalate = target < self.level && raw_level(score + DROP_MARGIN, rules) < self.level;
         let new = if escalate || deescalate { target } else { self.level };
         if new != self.level {
             let old = self.level;

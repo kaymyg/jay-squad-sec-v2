@@ -231,7 +231,7 @@ impl Engine {
                     continue;
                 }
                 p.risk.decay_to_with(now_ms, &rules);
-                let transition = p.observer.update(p.risk.score);
+                let transition = p.observer.update_with(p.risk.score, &rules);
                 let old_action = p.action;
                 let new_action = p.risk.action_with(&rules);
                 p.action = new_action;
