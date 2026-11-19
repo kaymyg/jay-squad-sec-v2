@@ -1,0 +1,14 @@
+[package]
+name = "jay-squad-sec-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Narrow C ABI boundary for the future Android JNI adapter"
+
+[lib]
+name = "jay_squad_sec_bridge"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jay-squad-sec-core = { path = "../core" }
+jay-squad-sec-protocol = { path = "../protocol" }
