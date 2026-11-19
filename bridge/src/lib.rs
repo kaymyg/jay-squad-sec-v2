@@ -37,7 +37,7 @@ pub struct JssEngine {
 /// Convert a caller-owned byte buffer to UTF-8 without allocating.
 /// The FFI caller must guarantee that a non-empty range is readable for the
 /// duration of the call. Length is checked before creating the slice.
-unsafe fn bounded_utf8<'a>(
+unsafe fn bounded_utf8(
     ptr: *const u8,
     len: usize,
     max: usize,
