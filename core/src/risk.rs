@@ -50,8 +50,13 @@ impl RiskState {
     /// Decay to `now` using the given rules' half-life, floor at zero.
     pub fn decay_to_with(&mut self, now_ms: u64, rules: &RulesConfig) {
         if now_ms > self.last_ms {
-            let dt = (now_ms - self.last_ms) as f32;
-            self.score *= 0.5f32.powf(dt / rules.half_life_ms);
+            // Only decay with a usable half-life. A zero/negative/NaN half-life
+            // (possible only in an unvalidated config) would otherwise zero the
+            // score instantly; not decaying keeps the evidence (fail closed).
+            if rules.half_life_ms.is_finite() && rules.half_life_ms > 0.0 {
+                let dt = (now_ms - self.last_ms) as f32;
+                self.score *= 0.5f32.powf(dt / rules.half_life_ms);
+            }
             self.last_ms = now_ms;
         }
         // Floor negatives only. A NaN is deliberately NOT scrubbed to 0: left as
@@ -69,7 +74,11 @@ impl RiskState {
     /// Decay, then absorb one piece of evidence using the given rules.
     pub fn absorb_with(&mut self, kind: EventKind, now_ms: u64, rules: &RulesConfig) {
         self.decay_to_with(now_ms, rules);
-        self.score = (self.score + rules.weight(kind)).max(0.0);
+        // Not `.max(0.0)`: f32::max ignores NaN, so it would turn a NaN score
+        // into 0 (Allow). This floors negatives and lets NaN propagate, which
+        // action_for maps to Block (fail closed).
+        let s = self.score + rules.weight(kind);
+        self.score = if s < 0.0 { 0.0 } else { s };
     }
 
     /// Current action under the default rules.
@@ -122,6 +131,25 @@ mod tests {
     fn nan_fails_closed_instead_of_open() {
         // an unevaluable score is the one case where Allow is the worst answer
         assert_eq!(action_for(f32::NAN), PolicyAction::Block);
+    }
+
+    #[test]
+    fn unvalidated_configs_fail_closed_in_risk_state() {
+        // NaN weight: score becomes NaN and must Block, not reset to Allow.
+        let mut bad = DEFAULT_RULES;
+        bad.weights[crate::rules::kind_index(EventKind::FileWrite)] = f32::NAN;
+        let mut r = RiskState::new(0);
+        r.absorb_with(EventKind::CredentialAccess, 0, &DEFAULT_RULES);
+        r.absorb_with(EventKind::FileWrite, 0, &bad);
+        assert_eq!(r.action_with(&bad), PolicyAction::Block);
+
+        // Zero half-life must not wipe accumulated evidence.
+        let mut zero = DEFAULT_RULES;
+        zero.half_life_ms = 0.0;
+        let mut r = RiskState::new(0);
+        r.absorb_with(EventKind::CredentialAccess, 0, &zero);
+        r.decay_to_with(60_000, &zero);
+        assert_eq!(r.score, 40.0);
     }
 
     #[test]

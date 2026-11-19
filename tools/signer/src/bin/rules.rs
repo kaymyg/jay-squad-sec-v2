@@ -53,10 +53,12 @@ fn to_text(r: &RulesConfig) -> String {
     let mut s = String::new();
     s.push_str("# Jay Squad Sec detection rules.\n");
     s.push_str("# Every key is required. Validation (enforced again on-device):\n");
-    s.push_str("#  - threat indicators must stay > 0 (a patch cannot disable a detection)\n");
-    s.push_str("#  - neutral high-volume events must stay >= 0 (no risk laundering)\n");
-    s.push_str("#  - good-evidence events must stay <= 0\n");
-    s.push_str("#  - 0 < monitor_at < restrict_at < suspend_at < block_at <= 10000\n\n");
+    s.push_str("#  - threat indicators: weight in [1, 100] (no detection can be silenced)\n");
+    s.push_str("#  - neutral events (process_start/exit, network_connect, file_write): [0, 5]\n");
+    s.push_str("#  - good evidence (signed_binary, stable_tick): [-20, 0]\n");
+    s.push_str("#  - half_life_ms in [10000, 3600000]\n");
+    s.push_str("#  - 5 <= monitor_at < restrict_at < suspend_at < block_at <= 400, steps >= 5\n");
+    s.push_str("#  - the 5 strongest indicator weights must sum to at least block_at\n\n");
     s.push_str(&format!("half_life_ms = {}\n", r.half_life_ms));
     s.push_str(&format!("monitor_at = {}\n", r.monitor_at));
     s.push_str(&format!("restrict_at = {}\n", r.restrict_at));
@@ -173,7 +175,7 @@ mod tests {
     #[test]
     fn invalid_values_are_rejected_with_the_product_rule() {
         let edited = to_text(&DEFAULT_RULES).replace("weight.credential_access = 40", "weight.credential_access = 0");
-        assert!(parse_text(&edited).unwrap_err().contains("must keep a positive weight"));
+        assert!(parse_text(&edited).unwrap_err().contains("cannot be silenced"));
         let nan = to_text(&DEFAULT_RULES).replace("block_at = 100", "block_at = NaN");
         assert!(parse_text(&nan).is_err());
     }
