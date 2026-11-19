@@ -50,6 +50,8 @@ use jay_squad_sec::engine::Engine;
 use jay_squad_sec::event::{Event, EventKind};
 use jay_squad_sec::rtid::Rtid;
 use jay_squad_sec_protocol::{validate, WireEvent, MAX_DETAIL_LEN, PROTOCOL_VERSION};
+use jay_squad_sec_apply::{UpdateStore, MAX_PATCH_FILE_BYTES};
+use std::path::PathBuf;
 use std::collections::{BTreeMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -78,6 +80,10 @@ pub const ERR_BAD_HANDLE: i32 = 7;
 pub const ERR_BUFFER_TOO_SMALL: i32 = 8;
 /// The generation is not newer than one already retired for this PID.
 pub const ERR_STALE_GENERATION: i32 = 9;
+/// No builder public key was embedded in this product build.
+pub const ERR_UPDATE_NOT_CONFIGURED: i32 = 10;
+/// A signed rules patch failed verification, policy validation or installation.
+pub const ERR_UPDATE_REJECTED: i32 = 11;
 
 /// Maximum simultaneously live engines per process.
 pub const MAX_ENGINES: usize = 8;
@@ -444,6 +450,102 @@ pub fn note_undelivered(handle: JssHandle, lines: u64) {
         st.alerts_dropped = st.alerts_dropped.saturating_add(lines);
         Ok(())
     });
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Signed rules updates (data only; no dynamic code loading).
+// ---------------------------------------------------------------------------
+
+/// Android has a distinct product identity: desktop-agent patches cannot be
+/// replayed into the consumer app. Set the matching product ID when signing.
+pub const ANDROID_PRODUCT_ID: &str = "jay-squad-sec-android";
+const MAX_STORAGE_PATH_LEN: usize = 4096;
+
+/// The public key is a build-time input, never supplied by Kotlin or JNI.
+/// Configure JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX to exactly 64 hex characters
+/// for a release build. An unconfigured build refuses all update operations.
+fn android_update_store(dir: &str) -> Result<UpdateStore, i32> {
+    let encoded = option_env!("JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX")
+        .ok_or(ERR_UPDATE_NOT_CONFIGURED)?;
+    let public_key = decode_public_key(encoded).ok_or(ERR_UPDATE_NOT_CONFIGURED)?;
+    let min_version = option_env!("JSS_ANDROID_MIN_RULES_VERSION")
+        .unwrap_or("0")
+        .parse::<u64>()
+        .map_err(|_| ERR_UPDATE_NOT_CONFIGURED)?;
+    Ok(UpdateStore::new(PathBuf::from(dir), public_key, ANDROID_PRODUCT_ID)
+        .with_min_version(min_version))
+}
+
+fn decode_public_key(encoded: &str) -> Option<[u8; 32]> {
+    let bytes = encoded.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (i, out) in key.iter_mut().enumerate() {
+        let hi = (bytes[i * 2] as char).to_digit(16)? as u8;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)? as u8;
+        *out = (hi << 4) | lo;
+    }
+    Some(key)
+}
+
+/// Load the highest verified Android rules patch from app-private storage.
+/// The embedded builder key and product ID are fixed by this native build.
+pub fn load_signed_rules(handle: JssHandle, storage_dir: &[u8]) -> Result<u64, i32> {
+    guarded(|| {
+        let dir = checked_text(storage_dir, MAX_STORAGE_PATH_LEN, false)?;
+        let store = android_update_store(&dir)?;
+        let inst = lookup(handle)?;
+        let mut state = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        let installed = store.load();
+        state.engine.set_rules(installed.rules).map_err(|_| ERR_UPDATE_REJECTED)?;
+        if installed.source != jay_squad_sec_apply::StateSource::Current
+            && installed.version > 0
+        {
+            state.push_alert(format!(
+                "[update] Android rules recovered from previous verified state, version {}",
+                installed.version
+            ));
+        }
+        Ok(installed.version)
+    })
+}
+
+/// Verify, validate and atomically install a signed data-only rules patch,
+/// then activate those rules in this engine. Caller supplies only bytes and
+/// app-private storage path; the builder public key is not caller-selectable.
+pub fn apply_signed_rules(
+    handle: JssHandle,
+    storage_dir: &[u8],
+    patch_bytes: &[u8],
+) -> Result<u64, i32> {
+    guarded(|| {
+        if patch_bytes.len() > MAX_PATCH_FILE_BYTES as usize {
+            return Err(ERR_INVALID);
+        }
+        let dir = checked_text(storage_dir, MAX_STORAGE_PATH_LEN, false)?;
+        let store = android_update_store(&dir)?;
+        let inst = lookup(handle)?;
+        let mut state = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        let installed = match store.apply_patch_bytes(patch_bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                state.push_alert("[update] Android rules patch rejected; active rules unchanged".into());
+                return Err(ERR_UPDATE_REJECTED);
+            }
+        };
+        // apply_patch_bytes has already decoded and validated the exact RulesConfig.
+        // set_rules validates again before changing the live engine.
+        state.engine.set_rules(installed.rules).map_err(|_| ERR_UPDATE_REJECTED)?;
+        state.push_alert(format!(
+            "[update] Android rules v{} verified, installed and activated",
+            installed.version
+        ));
+        Ok(installed.version)
+    })
 }
 
 // ---------------------------------------------------------------------------
