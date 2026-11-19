@@ -3,9 +3,24 @@
 version = 3
 
 [[package]]
+name = "ed25519-compact"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9b3460f44bea8cd47f45a0c70892f1eff856d97cd55358b2f73f663789f6190"
+
+[[package]]
+name = "jay-squad-sec-apply"
+version = "0.1.0"
+dependencies = [
+ "jay-squad-sec-core",
+ "jay-squad-sec-update",
+]
+
+[[package]]
 name = "jay-squad-sec-bridge"
 version = "0.1.0"
 dependencies = [
+ "jay-squad-sec-apply",
  "jay-squad-sec-core",
  "jay-squad-sec-protocol",
 ]
@@ -19,4 +34,11 @@ name = "jay-squad-sec-protocol"
 version = "0.1.0"
 dependencies = [
  "jay-squad-sec-core",
+]
+
+[[package]]
+name = "jay-squad-sec-update"
+version = "0.1.0"
+dependencies = [
+ "ed25519-compact",
 ]
