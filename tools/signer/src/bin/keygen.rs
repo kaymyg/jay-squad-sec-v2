@@ -31,7 +31,11 @@ fn main() {
     let (pk, sk) = jay_squad_sec_update::generate_keypair();
 
     if let Err(e) = write_secret(&out, &sk) {
-        eprintln!("failed to write secret key {out}: {e}");
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            eprintln!("refusing to overwrite existing key file {out} (remove it or pass --out NEWPATH)");
+        } else {
+            eprintln!("failed to write secret key {out}: {e}");
+        }
         exit(1);
     }
     let pk_hex: String = pk.iter().map(|b| format!("{b:02x}")).collect();
@@ -53,10 +57,12 @@ fn main() {
 #[cfg(unix)]
 fn write_secret(path: &str, sk: &[u8; 64]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
+    // create_new refuses to clobber an existing file, which could keep weak
+    // permissions or be a planted symlink redirecting the secret elsewhere.
+    // mode(0o600) takes effect because the file is newly created.
     let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600) // owner read/write only
         .open(path)?;
     f.write_all(sk)
@@ -64,5 +70,11 @@ fn write_secret(path: &str, sk: &[u8; 64]) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn write_secret(path: &str, sk: &[u8; 64]) -> std::io::Result<()> {
-    std::fs::write(path, sk)
+    // No Unix permission bits here; at least refuse to overwrite an existing
+    // file. Treat the secret key as sensitive and lock down its location.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    std::io::Write::write_all(&mut f, sk)
 }

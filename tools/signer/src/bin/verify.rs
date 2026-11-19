@@ -81,12 +81,17 @@ fn main() {
 }
 
 fn from_hex_32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    // Operate on bytes, not chars: a 64-byte string containing a multibyte
+    // UTF-8 char would otherwise slice through a char boundary and panic.
+    let b = s.as_bytes();
+    if b.len() != 64 {
         return None;
     }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+        let hi = (b[i * 2] as char).to_digit(16)?;
+        let lo = (b[i * 2 + 1] as char).to_digit(16)?;
+        *byte = (hi * 16 + lo) as u8;
     }
     Some(out)
 }
