@@ -1,10 +1,23 @@
-[package]
-name = "jay-squad-sec"
-version = "0.1.0"
-edition = "2021"
-description = "Prototype userspace core for the Jay Squad Sec adaptive zero-trust endpoint platform"
+# Jay Squad Sec — Cargo workspace.
+#
+# Stage 1 restructure: the engine is now a reusable library crate in core/,
+# with thin binary crates in apps/ that depend only on its public API. This
+# keeps the shared security engine platform-independent so Android, the JNI
+# bridge and other front ends cannot contaminate it.
+#
+#   core/        reusable security engine (lib crate `jay_squad_sec`)
+#   apps/demo    scripted simulation            (cargo run --bin demo)
+#   apps/agent   deployable alert-only agent    (cargo run --release --bin agent)
+#
+# Zero third-party dependencies on purpose: builds anywhere, no supply chain.
+# Production swaps (tracked for later stages): std hasher -> blake3,
+# keyed-hash capability -> ed25519 signature, simulated clock -> real time,
+# scripted sensor -> kernel adapters (eBPF/WFP/ETW).
 
-# Zero dependencies on purpose: builds anywhere, no supply chain.
-# Production swaps: std hasher -> blake3, u64 tag -> ed25519 signature,
-# simulated clock -> real time, scripted sensor -> kernel adapters (eBPF/WFP/ETW).
-[dependencies]
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "apps/demo",
+    "apps/agent",
+]

@@ -1,0 +1,14 @@
+[package]
+name = "jay-squad-sec-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Deployable alert-only monitoring agent built on the Jay Squad Sec engine"
+
+# Binary kept as `agent` so `cargo run --bin agent` and build_windows.cmd
+# (target/release/agent) continue to work unchanged.
+[[bin]]
+name = "agent"
+path = "src/main.rs"
+
+[dependencies]
+jay-squad-sec-core = { path = "../../core" }
