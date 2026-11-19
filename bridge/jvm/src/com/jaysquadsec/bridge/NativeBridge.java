@@ -20,6 +20,7 @@ public final class NativeBridge {
     public static final int ERR_IDENTITY_MISMATCH = 6;
     public static final int ERR_BAD_HANDLE = 7;
     public static final int ERR_BUFFER_TOO_SMALL = 8;
+    public static final int ERR_STALE_GENERATION = 9;
 
     /** ABI version this Java/Kotlin code was written against. */
     public static final int EXPECTED_ABI = 3;

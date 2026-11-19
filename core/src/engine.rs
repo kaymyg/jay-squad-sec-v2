@@ -154,7 +154,8 @@ impl Engine {
     pub fn audit_since(&self, seq: u64) -> (u64, impl Iterator<Item = (u64, &AuditEntry)>) {
         let first = self.audit_total - self.audit.len() as u64;
         let missed = first.saturating_sub(seq);
-        let skip = seq.saturating_sub(first) as usize;
+        // try_from, not `as`: on 32-bit targets `as usize` would truncate.
+        let skip = usize::try_from(seq.saturating_sub(first)).unwrap_or(usize::MAX);
         let iter = self
             .audit
             .iter()

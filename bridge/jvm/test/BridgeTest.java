@@ -132,6 +132,37 @@ public final class BridgeTest {
             }
         });
 
+        run("far-future timestamp cannot wipe risk (review finding)", () -> {
+            long h = NativeBridge.nativeNew(7);
+            for (String k : new String[] {"unsigned_module_load", "rwx_alloc", "privilege_escalation"})
+                check(submit(h, 10, 1, APP, k, "", 1) == NativeBridge.OK, k);
+            drain(h);
+            check(submit(h, 11, 1, utf8("com.noise:sha256:00"), "file_write", "", Long.MAX_VALUE)
+                  == NativeBridge.OK, "far-future event accepted as data");
+            String after = drain(h);
+            check(!after.contains("de-escalated"), "risk wiped by a timestamp: " + after);
+            NativeBridge.nativeFree(h);
+        });
+
+        run("retired generation cannot be revived (review finding)", () -> {
+            long h = NativeBridge.nativeNew(7);
+            check(submit(h, 20, 7, APP, "remote_thread_injection", "", 1) == NativeBridge.OK, "event");
+            check(submit(h, 20, 7, APP, "process_exit", "", 1) == NativeBridge.OK, "exit");
+            check(submit(h, 20, 7, utf8("com.attacker:sha256:ff"), "file_write", "", 1)
+                  == NativeBridge.ERR_STALE_GENERATION, "revive rejected");
+            check(drain(h).contains("stale generation rejected"), "recorded as an alert");
+            NativeBridge.nativeFree(h);
+        });
+
+        run("missed exits never exhaust capacity (review finding)", () -> {
+            long h = NativeBridge.nativeNew(7);
+            for (long gen = 1; gen <= 4200; gen++)
+                check(submit(h, 77, gen, APP, "file_write", "", 1) == NativeBridge.OK, "gen " + gen);
+            check(submit(h, 78, 1, APP, "privilege_escalation", "", 1) == NativeBridge.OK,
+                  "new process still accepted");
+            NativeBridge.nativeFree(h);
+        });
+
         run("engine capacity enforced across JNI", () -> {
             long[] hs = new long[8];
             for (int i = 0; i < hs.length; i++) { hs[i] = NativeBridge.nativeNew(i); check(hs[i] != 0, "new " + i); }

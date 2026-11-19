@@ -1,6 +1,6 @@
 //! Zero-dependency JNI entry points for `com.jaysquadsec.bridge.NativeBridge`.
 //!
-//! Only five JNIEnv functions are used, addressed by their index in the JNI
+//! Only six JNIEnv functions are used, addressed by their index in the JNI
 //! function table. The indices are fixed by the JNI specification (the table
 //! is append-only across JDK and Android releases) and were verified against
 //! `jni.h`; a unit test pins them so an accidental edit is caught.
@@ -18,8 +18,8 @@
 #![allow(non_snake_case)] // JNI symbol names are fixed by the Java class.
 
 use crate::{
-    engine_free, engine_new, guarded, submit, take_alerts, ABI_VERSION, ERR_INVALID, ERR_NULL,
-    MAX_IDENTITY_LEN, MAX_KIND_LEN, MIN_ALERT_BUFFER,
+    engine_free, engine_new, guarded, note_undelivered, submit, take_alerts, ABI_VERSION,
+    ERR_INVALID, ERR_NULL, MAX_IDENTITY_LEN, MAX_KIND_LEN, MIN_ALERT_BUFFER,
 };
 use jay_squad_sec_protocol::MAX_DETAIL_LEN;
 use std::ffi::c_void;
@@ -224,9 +224,19 @@ pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeTak
     let max = usize::try_from(max_bytes)
         .unwrap_or(0)
         .max(MIN_ALERT_BUFFER);
-    match guarded(|| take_alerts(handle_from(handle), max)) {
-        // SAFETY: env is valid for this call.
-        Ok(bytes) => unsafe { new_byte_array(env, &bytes) },
+    let h = handle_from(handle);
+    match guarded(|| take_alerts(h, max)) {
+        Ok(bytes) => {
+            // SAFETY: env is valid for this call.
+            let arr = unsafe { new_byte_array(env, &bytes) };
+            if arr.is_null() && !bytes.is_empty() {
+                // Lines were already dequeued; count them as dropped rather
+                // than losing them silently (e.g. OutOfMemoryError).
+                let lines = bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+                note_undelivered(h, lines);
+            }
+            arr
+        }
         Err(_) => std::ptr::null_mut(),
     }
 }
