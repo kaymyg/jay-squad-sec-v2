@@ -19,22 +19,41 @@
 //! the C ABI (pointer + length must be readable for the call). The JNI path
 //! copies Java arrays itself and has no such obligation.
 //!
+//! # Trusted time
+//!
+//! Each engine runs on its own monotonic clock (milliseconds since the engine
+//! was created). A caller's `at_ms` is validated and kept as information only;
+//! it never drives risk decay. Trusting it let a single far-future timestamp
+//! decay every process's risk to zero (found in review).
+//!
+//! # Process lifecycle
+//!
+//! One PID is one live process. When a PID arrives with a new generation, the
+//! old generation is retired first (Android often kills processes without any
+//! exit event). Retired generations are remembered per PID, so a retired
+//! `(pid, generation)` can never be revived with a clean score or a new
+//! identity. If identity capacity is still exhausted, the lowest-risk, least
+//! recently active identity is evicted (with an alert) rather than rejecting
+//! new processes, so a full table can never switch detection off.
+//!
 //! # Bounds
 //!
 //! Everything a caller can grow is capped: engines ([`MAX_ENGINES`]), live
-//! process identities per engine ([`MAX_IDENTITIES`]), queued alerts
-//! ([`MAX_ALERTS`], oldest dropped and reported), alert line length, and all
-//! input lengths. The engine's own audit ledger is a bounded ring in `core`.
+//! process identities per engine ([`MAX_IDENTITIES`]), remembered retired PIDs
+//! ([`MAX_RETIRED_PIDS`]), queued alerts ([`MAX_ALERTS`], oldest dropped and
+//! reported), alert line length, and all input lengths. The engine's own audit
+//! ledger is a bounded ring in `core`.
 
 pub mod jni;
 
 use jay_squad_sec::engine::Engine;
-use jay_squad_sec::event::EventKind;
+use jay_squad_sec::event::{Event, EventKind};
 use jay_squad_sec::rtid::Rtid;
 use jay_squad_sec_protocol::{validate, WireEvent, MAX_DETAIL_LEN, PROTOCOL_VERSION};
 use std::collections::{BTreeMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 /// Opaque engine handle. 0 is never a valid handle.
 pub type JssHandle = u64;
@@ -48,7 +67,8 @@ pub const ERR_INVALID: i32 = 2;
 pub const ERR_PANIC: i32 = 3;
 /// The engine's lock was poisoned by an earlier panic; the handle is unusable.
 pub const ERR_POISONED: i32 = 4;
-/// A capacity limit was reached (engines or live identities).
+/// A capacity limit was reached (engine count). Identity capacity never
+/// rejects: it evicts the lowest-risk idle identity instead.
 pub const ERR_CAPACITY: i32 = 5;
 /// A live (pid, generation) was submitted with a different package identity.
 pub const ERR_IDENTITY_MISMATCH: i32 = 6;
@@ -56,11 +76,16 @@ pub const ERR_IDENTITY_MISMATCH: i32 = 6;
 pub const ERR_BAD_HANDLE: i32 = 7;
 /// The output buffer is smaller than [`MIN_ALERT_BUFFER`].
 pub const ERR_BUFFER_TOO_SMALL: i32 = 8;
+/// The generation is not newer than one already retired for this PID.
+pub const ERR_STALE_GENERATION: i32 = 9;
 
 /// Maximum simultaneously live engines per process.
 pub const MAX_ENGINES: usize = 8;
 /// Maximum live process identities tracked per engine.
 pub const MAX_IDENTITIES: usize = 4096;
+/// Maximum PIDs whose highest retired generation is remembered per engine
+/// (oldest forgotten first). Bounds memory against a huge PID space.
+pub const MAX_RETIRED_PIDS: usize = 65_536;
 /// Maximum queued alert lines per engine before the oldest are dropped.
 pub const MAX_ALERTS: usize = 256;
 /// Alert lines longer than this many bytes are truncated (at a char boundary).
@@ -75,15 +100,88 @@ pub const ABI_VERSION: u32 = 3;
 struct Identity {
     rtid: Rtid,
     package: String,
+    last_seen_ms: u64,
 }
 
 struct EngineState {
     engine: Engine,
+    /// Trusted monotonic time origin for this engine.
+    started: Instant,
     // PID alone is not identity: Android reuses PIDs. The adapter supplies a
-    // generation that changes whenever a PID is reused.
+    // generation that changes whenever a PID is reused. One live entry per pid.
     identities: BTreeMap<(u32, u64), Identity>,
+    /// Highest retired generation per PID; generations at or below it are stale.
+    retired: BTreeMap<u32, u64>,
+    /// Insertion order of `retired`, for bounded FIFO forgetting.
+    retired_order: VecDeque<u32>,
     alerts: VecDeque<String>,
     alerts_dropped: u64,
+}
+
+impl EngineState {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn push_alert(&mut self, line: String) {
+        if self.alerts.len() >= MAX_ALERTS {
+            self.alerts.pop_front();
+            self.alerts_dropped += 1;
+        }
+        self.alerts.push_back(truncate_line(line));
+    }
+
+    fn remember_retired(&mut self, pid: u32, generation: u64) {
+        let entry = self.retired.entry(pid).or_insert(0);
+        let fresh = *entry == 0;
+        if generation > *entry {
+            *entry = generation;
+        }
+        if fresh {
+            self.retired_order.push_back(pid);
+            while self.retired_order.len() > MAX_RETIRED_PIDS {
+                if let Some(old) = self.retired_order.pop_front() {
+                    self.retired.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// Retire a live identity: tell the engine the process is gone (its state
+    /// is pruned after the next tick) and remember the generation as retired.
+    fn retire(&mut self, key: (u32, u64), now_ms: u64) {
+        if let Some(id) = self.identities.remove(&key) {
+            self.engine.bus.publish(Event {
+                rtid: id.rtid,
+                kind: EventKind::ProcessExit,
+                at_ms: now_ms,
+                detail: String::new(),
+            });
+        }
+        self.remember_retired(key.0, key.1);
+    }
+
+    /// Pick the identity to evict when full: lowest current risk, then least
+    /// recently active, so a flood of new processes cannot push a suspicious
+    /// one out of the table.
+    fn eviction_victim(&self) -> Option<(u32, u64)> {
+        self.identities
+            .iter()
+            .min_by(|(_, a), (_, b)| {
+                let ra = self
+                    .engine
+                    .process(a.rtid)
+                    .map(|p| p.risk.score)
+                    .unwrap_or(0.0);
+                let rb = self
+                    .engine
+                    .process(b.rtid)
+                    .map(|p| p.risk.score)
+                    .unwrap_or(0.0);
+                ra.total_cmp(&rb).then(a.last_seen_ms.cmp(&b.last_seen_ms))
+            })
+            .map(|(k, _)| *k)
+    }
 }
 
 struct Instance {
@@ -158,7 +256,10 @@ pub fn engine_new(boot_nonce: u64) -> JssHandle {
         let inst = Instance {
             state: Mutex::new(EngineState {
                 engine,
+                started: Instant::now(),
                 identities: BTreeMap::new(),
+                retired: BTreeMap::new(),
+                retired_order: VecDeque::new(),
                 alerts: VecDeque::new(),
                 alerts_dropped: 0,
             }),
@@ -173,11 +274,10 @@ pub fn engine_new(boot_nonce: u64) -> JssHandle {
 /// call twice (the second call returns [`ERR_BAD_HANDLE`]).
 pub fn engine_free(handle: JssHandle) -> i32 {
     match guarded(|| {
-        registry()
-            .live
-            .remove(&handle)
-            .map(|_| ())
-            .ok_or(ERR_BAD_HANDLE)
+        // Take the instance out under the registry lock, but drop it (which
+        // may tear down thousands of processes) only after releasing the lock.
+        let removed = registry().live.remove(&handle);
+        removed.map(drop).ok_or(ERR_BAD_HANDLE)
     }) {
         Ok(()) => OK,
         Err(e) => e,
@@ -218,44 +318,82 @@ pub fn submit(
 
         let inst = lookup(handle)?;
         let mut st = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        let now = st.now_ms();
         let key = (pid, process_generation);
+
+        // A generation at or below one already retired for this pid is stale:
+        // reviving it would reset its score and allow an identity change.
+        if st
+            .retired
+            .get(&pid)
+            .is_some_and(|&r| process_generation <= r)
+        {
+            st.push_alert(format!(
+                "[bridge] stale generation rejected pid={pid} gen={process_generation}"
+            ));
+            return Err(ERR_STALE_GENERATION);
+        }
+
         let rtid = match st.identities.get(&key) {
             Some(existing) if existing.package != identity => {
+                // A live process changing identity is itself a security signal.
+                st.push_alert(format!(
+                    "[bridge] identity mismatch rejected pid={pid} gen={process_generation}"
+                ));
                 return Err(ERR_IDENTITY_MISMATCH);
             }
             Some(existing) => existing.rtid,
             None => {
-                if st.identities.len() >= MAX_IDENTITIES {
-                    return Err(ERR_CAPACITY);
+                // One pid is one live process: retire any older generation
+                // that never sent an exit (common on Android).
+                let stale: Vec<(u32, u64)> = st
+                    .identities
+                    .range((pid, 0)..=(pid, u64::MAX))
+                    .map(|(k, _)| *k)
+                    .collect();
+                for old in stale {
+                    st.retire(old, now);
                 }
-                let rtid = st.engine.adopt(&identity, identity.as_bytes(), at_ms);
+                if st.identities.len() >= MAX_IDENTITIES {
+                    if let Some(victim) = st.eviction_victim() {
+                        st.retire(victim, now);
+                        st.push_alert(format!(
+                            "[bridge] identity table full; evicted lowest-risk idle pid={} gen={}",
+                            victim.0, victim.1
+                        ));
+                    }
+                }
+                let rtid = st.engine.adopt(&identity, identity.as_bytes(), now);
                 st.identities.insert(
                     key,
                     Identity {
                         rtid,
                         package: identity,
+                        last_seen_ms: now,
                     },
                 );
                 rtid
             }
         };
+        if let Some(id) = st.identities.get_mut(&key) {
+            id.last_seen_ms = now;
+        }
 
         let is_exit = validated.kind == EventKind::ProcessExit;
+        // The caller's at_ms stays on the event as information; the engine
+        // advances only on its own trusted clock.
         st.engine.bus.publish(validated.into_event(rtid));
-        let lines = st.engine.tick(at_ms);
-        for line in lines {
-            if st.alerts.len() >= MAX_ALERTS {
-                st.alerts.pop_front();
-                st.alerts_dropped += 1;
-            }
-            st.alerts.push_back(truncate_line(line));
+        for line in st.engine.tick(now) {
+            st.push_alert(line);
         }
         if is_exit {
-            // Retire the identity so a reused PID can never inherit its risk,
-            // and drop the engine's state for it (bounded memory).
-            st.identities.remove(&key);
-            st.engine.prune_exited();
+            st.retire(key, now);
+            for line in st.engine.tick(now) {
+                st.push_alert(line);
+            }
         }
+        // Drop state for every exited/retired process (bounded memory).
+        st.engine.prune_exited();
         Ok(())
     });
     match result {
@@ -296,6 +434,18 @@ pub fn take_alerts(handle: JssHandle, max_bytes: usize) -> Result<Vec<u8>, i32> 
     })
 }
 
+/// Report that `lines` alerts already taken from the queue could not be
+/// delivered (e.g. the JVM could not allocate the result array), so the next
+/// take reports them as dropped instead of losing them silently.
+pub fn note_undelivered(handle: JssHandle, lines: u64) {
+    let _ = guarded(|| {
+        let inst = lookup(handle)?;
+        let mut st = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        st.alerts_dropped = st.alerts_dropped.saturating_add(lines);
+        Ok(())
+    });
+}
+
 // ---------------------------------------------------------------------------
 // C ABI
 // ---------------------------------------------------------------------------
@@ -334,7 +484,10 @@ unsafe fn caller_bytes<'a>(ptr: *const u8, len: usize, max: usize) -> Result<&'a
 
 /// Submit one event using bounded byte buffers.
 ///
-/// - `process_generation` must change whenever the OS reuses a PID.
+/// - `process_generation` must increase whenever the OS reuses a PID. A new
+///   generation retires the previous one; a retired one is rejected with
+///   [`ERR_STALE_GENERATION`].
+/// - `at_ms` is informational only; the engine uses its own monotonic clock.
 /// - `package_identity` should be the canonical package name plus signing
 ///   certificate digest, supplied by the trusted Android adapter. A live
 ///   `(pid, generation)` can never change identity ([`ERR_IDENTITY_MISMATCH`]).
@@ -344,8 +497,9 @@ unsafe fn caller_bytes<'a>(ptr: *const u8, len: usize, max: usize) -> Result<&'a
 ///
 /// # Safety
 /// Every buffer with a non-zero length must be readable for that length until
-/// this function returns. The handle itself needs no care: invalid, freed or
-/// concurrently-freed handles are detected.
+/// this function returns, and must not be written by another thread during the
+/// call. The handle itself needs no care: invalid, freed or concurrently-freed
+/// handles are detected.
 #[no_mangle]
 pub unsafe extern "C" fn jss_engine_submit_event(
     handle: JssHandle,
@@ -379,8 +533,9 @@ pub unsafe extern "C" fn jss_engine_submit_event(
 /// nothing is consumed and `*out_len` is set to 0 when writable.
 ///
 /// # Safety
-/// `out` must be writable for `out_cap` bytes and `out_len` writable, for the
-/// duration of the call.
+/// `out` must be writable for `out_cap` bytes and `out_len` must be a valid,
+/// aligned, writable pointer, for the duration of the call. Neither may be
+/// accessed by another thread during the call.
 #[no_mangle]
 pub unsafe extern "C" fn jss_engine_take_alerts(
     handle: JssHandle,

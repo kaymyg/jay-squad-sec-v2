@@ -179,6 +179,11 @@ fn a_live_process_cannot_change_identity() {
         c_submit(h, 42, 1, b"com.attacker:sha256:ff", b"file_write", b"", 2),
         ERR_IDENTITY_MISMATCH
     );
+    let alerts = c_take(h, 64 * 1024).1;
+    assert!(
+        alerts.contains("identity mismatch rejected pid=42"),
+        "must be recorded: {alerts}"
+    );
     jss_engine_free(h);
 }
 
@@ -186,31 +191,105 @@ fn a_live_process_cannot_change_identity() {
 fn exit_retires_identity_so_a_reused_pid_starts_clean() {
     let _g = lock();
     let h = jss_engine_new(7);
-    // Build suspicion on pid 42 generation 1, then it exits.
-    for (i, k) in [
+    for k in [
         "unsigned_module_load",
         "rwx_alloc",
         "remote_thread_injection",
-    ]
-    .iter()
-    .enumerate()
-    {
-        assert_eq!(
-            c_submit(h, 42, 1, APP, k.as_bytes(), b"", 10 + i as u64),
-            OK
-        );
+    ] {
+        assert_eq!(c_submit(h, 42, 1, APP, k.as_bytes(), b"", 1), OK);
     }
-    assert_eq!(c_submit(h, 42, 1, APP, b"process_exit", b"", 20), OK);
+    assert_eq!(c_submit(h, 42, 1, APP, b"process_exit", b"", 1), OK);
     let _ = c_take(h, 64 * 1024);
-    // Same pid, same generation, different app: allowed now (identity retired),
-    // and the new app must not inherit any alert-worthy risk.
+    // The OS reuses pid 42 for a different app with a NEW generation.
     let other = b"com.other.app:sha256:cd34";
-    assert_eq!(c_submit(h, 42, 1, other, b"file_write", b"", 30), OK);
+    assert_eq!(c_submit(h, 42, 2, other, b"file_write", b"", 1), OK);
     let (_, alerts) = c_take(h, 64 * 1024);
     assert!(
         !alerts.contains("ALERT"),
         "reused pid inherited risk: {alerts}"
     );
+    jss_engine_free(h);
+}
+
+#[test]
+fn a_retired_generation_cannot_be_revived() {
+    // Review finding: after exit, the same (pid, gen) came back with zero risk
+    // and a different identity.
+    let _g = lock();
+    let h = jss_engine_new(7);
+    assert_eq!(
+        c_submit(h, 20, 7, APP, b"remote_thread_injection", b"", 1),
+        OK
+    );
+    assert_eq!(c_submit(h, 20, 7, APP, b"process_exit", b"", 1), OK);
+    let _ = c_take(h, 64 * 1024);
+    let attacker = b"com.attacker:sha256:ff";
+    assert_eq!(
+        c_submit(h, 20, 7, attacker, b"file_write", b"", 1),
+        ERR_STALE_GENERATION
+    );
+    assert_eq!(
+        c_submit(h, 20, 6, attacker, b"file_write", b"", 1),
+        ERR_STALE_GENERATION
+    );
+    let (_, alerts) = c_take(h, 64 * 1024);
+    assert!(
+        alerts.contains("stale generation rejected pid=20"),
+        "must be recorded: {alerts}"
+    );
+    jss_engine_free(h);
+}
+
+#[test]
+fn a_far_future_timestamp_cannot_wipe_risk() {
+    // Review finding: one event with at_ms = i64::MAX decayed every process's
+    // risk to zero. The engine now ignores caller time for decay.
+    let _g = lock();
+    let h = jss_engine_new(7);
+    for k in ["unsigned_module_load", "rwx_alloc", "privilege_escalation"] {
+        assert_eq!(c_submit(h, 10, 1, APP, k.as_bytes(), b"", 1), OK);
+    }
+    let before = c_take(h, 64 * 1024).1;
+    assert!(
+        before.contains("Restrict") || before.contains("RESTRICT") || before.contains("would"),
+        "{before}"
+    );
+    // Another process sends a far-future timestamp.
+    assert_eq!(
+        c_submit(
+            h,
+            11,
+            1,
+            b"com.noise:sha256:00",
+            b"file_write",
+            b"",
+            i64::MAX as u64
+        ),
+        OK
+    );
+    let after = c_take(h, 64 * 1024).1;
+    assert!(
+        !after.contains("de-escalated"),
+        "risk was wiped by a timestamp: {after}"
+    );
+    jss_engine_free(h);
+}
+
+#[test]
+fn a_new_generation_retires_the_old_one_without_an_exit() {
+    // Review finding: processes killed without an exit event leaked identity
+    // capacity until every new process was rejected (fail open).
+    let _g = lock();
+    let h = jss_engine_new(7);
+    for gen in 1..=(MAX_IDENTITIES as u64 + 50) {
+        assert_eq!(
+            c_submit(h, 77, gen, APP, b"file_write", b"", 1),
+            OK,
+            "gen {gen}"
+        );
+    }
+    // Detection still works for a brand-new process.
+    assert_eq!(c_submit(h, 78, 1, APP, b"privilege_escalation", b"", 1), OK);
     jss_engine_free(h);
 }
 
@@ -291,19 +370,35 @@ fn alert_queue_is_bounded_and_reports_drops() {
 }
 
 #[test]
-fn identity_capacity_is_enforced() {
+fn a_full_identity_table_evicts_low_risk_and_never_rejects() {
     let _g = lock();
     let h = jss_engine_new(7);
-    for p in 0..MAX_IDENTITIES as u32 {
-        assert_eq!(c_submit(h, 1 + p, 1, APP, b"file_write", b"", 1), OK);
+    // One suspicious process first.
+    for k in ["remote_thread_injection", "credential_access"] {
+        assert_eq!(c_submit(h, 1, 1, APP, k.as_bytes(), b"", 1), OK);
     }
-    assert_eq!(
-        c_submit(h, 900_000, 1, APP, b"file_write", b"", 1),
-        ERR_CAPACITY
+    // Fill the table with benign processes, then keep going past capacity.
+    for p in 2..=(MAX_IDENTITIES as u32 + 20) {
+        assert_eq!(
+            c_submit(h, p, 1, APP, b"file_write", b"", 1),
+            OK,
+            "pid {p} rejected"
+        );
+    }
+    let alerts = c_take(h, 1 << 20).1;
+    assert!(
+        alerts.contains("identity table full; evicted"),
+        "eviction must be reported"
     );
-    // Existing identities keep working; an exit frees a slot.
-    assert_eq!(c_submit(h, 1, 1, APP, b"process_exit", b"", 2), OK);
-    assert_eq!(c_submit(h, 900_000, 1, APP, b"file_write", b"", 3), OK);
+    assert!(
+        !alerts.contains("evicted lowest-risk idle pid=1 "),
+        "the suspicious process must not be evicted"
+    );
+    // The suspicious process is still tracked: its identity still can't change.
+    assert_eq!(
+        c_submit(h, 1, 1, b"com.attacker:sha256:ff", b"file_write", b"", 1),
+        ERR_IDENTITY_MISMATCH
+    );
     jss_engine_free(h);
 }
 

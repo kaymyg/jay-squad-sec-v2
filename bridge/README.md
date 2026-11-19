@@ -24,30 +24,50 @@ call. As a result:
 | Close while other threads are inside calls | Safe: the handle stops resolving at once and the engine is dropped when the last in-flight call returns |
 | Bogus or zero handle | `ERR_BAD_HANDLE` |
 
-The Kotlin wrapper adds an idempotent `close()`, a `Cleaner` fallback if the
-object is collected unclosed, and maps error codes to exceptions.
+The Kotlin wrapper adds an idempotent, thread-safe `close()` and maps error
+codes to exceptions. Close it explicitly or with `use { }`. There is no
+GC-based cleanup, because `java.lang.ref.Cleaner` needs Android API 33. A
+leaked engine only holds one engine slot until the app process ends; it is
+never unsafe.
 
 The one obligation left on a caller applies only to the **C ABI**: a buffer
 passed as pointer and length must be readable for that length during the
 call. The JNI path copies Java arrays itself (`GetByteArrayRegion`, after a
 length check), so it has no such obligation.
 
-## Identity
+## Trusted time
+
+Each engine runs on its own monotonic clock. The caller's `at_ms` is checked
+and kept on the event as information, but never drives risk decay. Trusting
+it let a single far-future timestamp decay every process's risk to zero
+(found in review; a regression test covers it).
+
+## Identity and process lifecycle
 
 Events are keyed by `(pid, process_generation)`. The Android adapter must
-change the generation whenever a PID is reused, and must supply a canonical
-package identity (package name plus signing-certificate digest).
+**increase** the generation whenever a PID is reused, and must supply a
+canonical package identity (package name plus signing-certificate digest).
 
-- A live `(pid, generation)` can never change identity: `ERR_IDENTITY_MISMATCH`.
-- A `process_exit` event retires the identity and drops its engine state, so
-  a reused PID never inherits the previous process's risk.
+- A live `(pid, generation)` can never change identity. The attempt returns
+  `ERR_IDENTITY_MISMATCH` and is recorded as an alert.
+- One PID is one live process. A new generation retires the old one, because
+  Android often kills processes without any exit event. A `process_exit` also
+  retires the identity. Either way the engine's state for it is dropped, so a
+  reused PID never inherits the previous process's risk.
+- A retired generation, or any lower one, is refused with
+  `ERR_STALE_GENERATION` and recorded as an alert, so a retired process can't
+  come back with a clean score or a new identity.
+- When the identity table is full, the **lowest-risk, least recently active**
+  identity is evicted (with an alert), never the suspicious ones. A full table
+  can't switch detection off.
 
 ## Bounds
 
 | Limit | Value | When reached |
 |---|---|---|
 | Live engines per process | 8 | `new` returns 0 |
-| Live identities per engine | 4096 | `ERR_CAPACITY`; an exit frees a slot |
+| Live identities per engine | 4096 | Lowest-risk idle identity evicted, with an alert |
+| Retired PIDs remembered per engine | 65,536 | Oldest forgotten first |
 | Queued alert lines per engine | 256 | Oldest dropped; next `take` starts with a `[bridge] N alerts dropped` line |
 | Alert line length | 1024 bytes | Truncated at a char boundary |
 | Package identity / kind / detail | 512 / 64 / 4096 bytes | `ERR_INVALID` |
@@ -60,7 +80,7 @@ checked for bidi-override and zero-width characters by the protocol crate.
 
 `OK 0`, `ERR_NULL 1`, `ERR_INVALID 2`, `ERR_PANIC 3`, `ERR_POISONED 4`,
 `ERR_CAPACITY 5`, `ERR_IDENTITY_MISMATCH 6`, `ERR_BAD_HANDLE 7`,
-`ERR_BUFFER_TOO_SMALL 8`. A panic inside the bridge is caught and reported
+`ERR_BUFFER_TOO_SMALL 8`, `ERR_STALE_GENERATION 9`. A panic inside the bridge is caught and reported
 as `ERR_PANIC`, never unwound into the JVM or a C caller. A poisoned engine
 lock makes only that handle unusable.
 
@@ -81,8 +101,12 @@ bridge/jvm/run-jvm-test.sh                     # live JVM, -Xcheck:jni
 The JVM test loads the real shared library and calls the same native methods
 the Android app calls. It covers detection flowing out to Java, double close,
 use after close, closing under 8 concurrent submitting threads (20 rounds),
-null arrays, hostile input, identity changes and capacity. Android's runtime
-uses the same JNI ABI.
+null arrays, hostile input, identity changes, capacity, and the three
+detection-bypass findings from review (far-future timestamp, revived
+generation, capacity exhausted by missed exits). Android's runtime uses the
+same JNI ABI.
+
+Each review regression test was checked to fail when its bug is put back.
 
 ## Not done yet
 

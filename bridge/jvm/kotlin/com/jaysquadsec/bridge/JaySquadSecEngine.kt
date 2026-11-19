@@ -1,6 +1,5 @@
 package com.jaysquadsec.bridge
 
-import java.lang.ref.Cleaner
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicLong
 
@@ -14,9 +13,12 @@ import java.util.concurrent.atomic.AtomicLong
  *   threads are inside [submit] or [takeAlerts]: those calls either complete
  *   normally or report [EngineClosedException]; the native side keeps the
  *   engine alive until in-flight calls finish.
- * - If the object is garbage-collected without [close], a [Cleaner] releases
- *   the native engine. Prefer `use { }` or explicit [close]: GC timing is not
- *   guaranteed and the engine limit is small.
+ * - [close] must be called explicitly (or use `use { }`). There is deliberately
+ *   no GC-based cleanup: `java.lang.ref.Cleaner` needs Android API 33, and GC
+ *   timing is unreliable anyway. A leaked engine only holds one of the
+ *   per-process engine slots until the app process ends; it is never unsafe.
+ *
+ * Works on any API level that can load the native library.
  *
  * NOTE: not compiled in the Rust repository's environment (no kotlinc). It is a
  * thin layer over [NativeBridge], whose JNI behaviour is covered by
@@ -24,28 +26,22 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
 
-    private val state = State(handle)
-    private val cleanable = CLEANER.register(this, state)
-
-    /** Native handle, or 0 once closed. Releases happen at most once. */
-    private class State(handle: Long) : Runnable {
-        val handle = AtomicLong(handle)
-        override fun run() {
-            val h = handle.getAndSet(0L)
-            if (h != 0L) NativeBridge.nativeFree(h)
-        }
-    }
+    /** Native handle, or 0 once closed. */
+    private val handle = AtomicLong(handle)
 
     /**
      * Submit one normalized observation.
      *
      * @param pid OS process id (> 0).
-     * @param generation changes whenever the OS reuses [pid] (> 0).
+     * @param generation must increase whenever the OS reuses [pid] (> 0). A new
+     *   generation retires the previous process on that pid.
      * @param packageIdentity canonical package name plus signing-certificate
      *   digest, e.g. "com.example.app:sha256:<hex>". Fixed for a live process.
      * @param kind canonical event kind, e.g. "network_connect".
      * @param detail bounded, control-character-free detail ("" if none).
-     * @param atMs monotonic event time in milliseconds (>= 0).
+     * @param atMs event time in milliseconds (>= 0). Informational only: the
+     *   engine runs on its own monotonic clock, so a wrong or hostile timestamp
+     *   cannot change risk decay.
      */
     fun submit(pid: Int, generation: Long, packageIdentity: String, kind: String, detail: String, atMs: Long) {
         val h = liveHandle()
@@ -59,16 +55,23 @@ class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
     fun takeAlerts(maxBytes: Int = DEFAULT_ALERT_BYTES): List<String> {
         val h = liveHandle()
         val bytes = NativeBridge.nativeTakeAlerts(h, maxBytes)
-            ?: throw EngineClosedException() // null: freed concurrently or poisoned
+            ?: if (handle.get() == 0L) {
+                throw EngineClosedException() // closed concurrently
+            } else {
+                throw IllegalStateException("security engine unavailable (internal failure)")
+            }
         if (bytes.isEmpty()) return emptyList()
         return String(bytes, StandardCharsets.UTF_8).split('\n').filter { it.isNotEmpty() }
     }
 
     /** Idempotent, thread-safe; safe to call during in-flight calls. */
-    override fun close() = cleanable.clean()
+    override fun close() {
+        val h = handle.getAndSet(0L)
+        if (h != 0L) NativeBridge.nativeFree(h)
+    }
 
     private fun liveHandle(): Long {
-        val h = state.handle.get()
+        val h = handle.get()
         if (h == 0L) throw EngineClosedException()
         return h
     }
@@ -81,6 +84,8 @@ class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
                 throw IllegalArgumentException("event rejected by the security engine")
             NativeBridge.ERR_IDENTITY_MISMATCH ->
                 throw SecurityException("package identity changed for a live process")
+            NativeBridge.ERR_STALE_GENERATION ->
+                throw IllegalArgumentException("process generation is not newer than a retired one")
             NativeBridge.ERR_CAPACITY -> throw IllegalStateException("engine capacity reached")
             else -> throw IllegalStateException("security engine error $code")
         }
@@ -88,7 +93,6 @@ class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
 
     companion object {
         const val DEFAULT_ALERT_BYTES = 64 * 1024
-        private val CLEANER: Cleaner = Cleaner.create()
 
         init {
             System.loadLibrary("jay_squad_sec_bridge")
