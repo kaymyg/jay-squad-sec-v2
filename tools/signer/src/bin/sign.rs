@@ -47,6 +47,13 @@ fn main() {
             exit(2);
         }
     };
+    // Devices accept only versions strictly newer than installed (>= 1 on a
+    // fresh device), and a huge version would be unrecoverable: once a device
+    // installs it, no later patch can ever be newer. Keep versions sane.
+    if version == 0 || version > u64::from(u32::MAX) {
+        eprintln!("--version must be between 1 and {} (got {version})", u32::MAX);
+        exit(2);
+    }
 
     let sk_bytes = read_or_die(&key, "secret key");
     let sk: [u8; 64] = match sk_bytes.as_slice().try_into() {

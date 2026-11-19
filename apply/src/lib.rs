@@ -8,31 +8,45 @@
 //! **Self-authenticating state.** What is persisted is the signed patch itself,
 //! not a bare rules file, and its signature is re-verified on every load. So
 //! someone who can write the app's storage still cannot install rules without
-//! the builder's private key: a tampered state file fails verification and the
-//! store falls back to the previous signed state, then to the compiled-in
-//! defaults. Updates carry data only (see `jay_squad_sec::rules`), never code.
+//! the builder's private key: a tampered state file fails verification and is
+//! ignored. Updates carry data only (see `jay_squad_sec::rules`), never code.
+//!
+//! **Highest verified version wins.** Both the current and the previous state
+//! file are verified on load and the higher version is used, so swapping an
+//! older genuine patch into the current slot does not downgrade the rules.
+//!
+//! **Hostile directory.** State paths must be regular files: symlinks, FIFOs
+//! and directories are refused without being opened (no reading through a
+//! planted symlink, no hang on a FIFO). Temp files get unique names and are
+//! created exclusively (`create_new`, i.e. O_EXCL), which never follows or
+//! overwrites an existing symlink, so a planted link cannot redirect writes.
 //!
 //! **Crash safety.** New state is written to a temp file, fsynced, then moved
 //! into place with an atomic rename, so the state file is always either the
 //! complete old version or the complete new one. The previous good state is
-//! kept as a fallback, and is always re-encoded from a *verified* state, never
-//! blindly copied, so a corrupt file can never displace a good fallback.
+//! kept as a fallback, re-encoded from a *verified* state, never blindly copied.
 //!
-//! **Concurrency.** Callers must serialize `apply_*` calls (the engine bridge
-//! holds a single store behind its lock). `load` is safe to call any time.
+//! **Concurrency.** `apply_*` calls are serialized within a process by a global
+//! lock. Running two processes against one state directory is unsupported.
 //!
-//! **Residual risk (documented, not hidden).** If an attacker can *delete* the
-//! state files, the store reverts to the compiled-in defaults at version 0,
-//! after which an older, genuinely builder-signed patch could be re-applied.
-//! That can only ever install rules the builder actually signed, and all of
-//! them pass validation, but it is a downgrade. Platform storage protection
-//! (Android app-private storage) is the control for that case.
+//! **Residual risk (documented, not hidden).** Someone who can *delete* files
+//! in the state directory can remove the current state (one-step downgrade to
+//! the previous verified patch) or both (revert to compiled-in defaults at
+//! version 0, after which an older builder-signed patch could be re-applied).
+//! Every such outcome is rules the builder actually signed, all passing
+//! validation. Mitigations: [`UpdateStore::with_min_version`] (set it to the
+//! latest shipped patch version in each release so older patches can never
+//! come back), `RecoveredFromPrevious` is surfaced as a tamper warning, and
+//! platform storage protection (Android app-private storage). A hardware-backed
+//! high-water mark (Android Keystore) is planned with the Android integration.
 
 use jay_squad_sec::rules::{RulesConfig, RulesError, DEFAULT_RULES};
 use jay_squad_sec_update::{SignedPatch, UpdateError, Verifier};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Current installed state: the signed patch that produced the active rules.
 pub const STATE_FILE: &str = "rules.jssp";
@@ -42,15 +56,18 @@ pub const PREV_FILE: &str = "rules.prev.jssp";
 /// before reading it into memory.
 pub const MAX_PATCH_FILE_BYTES: u64 = 64 * 1024;
 
+/// Serializes all applies in this process (load -> verify -> write).
+static APPLY_LOCK: Mutex<()> = Mutex::new(());
+
 /// Where the active rules came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateSource {
     /// No installed update: compiled-in defaults.
     Default,
-    /// The current state file verified successfully.
+    /// The current state file verified and holds the highest version.
     Current,
-    /// The current state file was missing/corrupt/tampered; the previous
-    /// verified state was used instead.
+    /// The previous state file was used: the current one was missing, invalid,
+    /// tampered, or older. Treat as a possible tampering signal.
     RecoveredFromPrevious,
 }
 
@@ -70,6 +87,10 @@ pub enum ApplyError {
     Io(std::io::ErrorKind),
     /// Patch file exceeded [`MAX_PATCH_FILE_BYTES`].
     PatchTooLarge,
+    /// A path that must be a regular file is a symlink, FIFO, directory, etc.
+    NotARegularFile,
+    /// Patch version is below this build's minimum accepted rules version.
+    BelowMinimumVersion { got: u64, min: u64 },
     /// Patch failed decoding or signature/product/rollback verification.
     Update(UpdateError),
     /// Patch was authentic but its payload is not a valid rules config.
@@ -82,6 +103,10 @@ impl core::fmt::Display for ApplyError {
             ApplyError::Io(k) => write!(f, "filesystem error: {k:?}"),
             ApplyError::PatchTooLarge => {
                 write!(f, "patch file exceeds {MAX_PATCH_FILE_BYTES} bytes")
+            }
+            ApplyError::NotARegularFile => write!(f, "path is not a regular file"),
+            ApplyError::BelowMinimumVersion { got, min } => {
+                write!(f, "patch version {got} is below this build's minimum {min}")
             }
             ApplyError::Update(e) => write!(f, "patch rejected: {e}"),
             ApplyError::Rules(e) => write!(f, "patch payload rejected: {e}"),
@@ -112,11 +137,20 @@ pub struct UpdateStore {
     dir: PathBuf,
     public_key: [u8; 32],
     product_id: String,
+    min_version: u64,
 }
 
 impl UpdateStore {
     pub fn new(dir: impl Into<PathBuf>, public_key: [u8; 32], product_id: impl Into<String>) -> Self {
-        Self { dir: dir.into(), public_key, product_id: product_id.into() }
+        Self { dir: dir.into(), public_key, product_id: product_id.into(), min_version: 0 }
+    }
+
+    /// Refuse, and ignore on disk, any rules patch older than `min`. Set this
+    /// to the latest shipped patch version in each release, so that even if
+    /// the state directory is wiped an older patch can never be re-applied.
+    pub fn with_min_version(mut self, min: u64) -> Self {
+        self.min_version = min;
+        self
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -124,40 +158,48 @@ impl UpdateStore {
     }
 
     /// Read and fully re-verify a stored signed patch. Returns `None` for a
-    /// missing, oversized, undecodable, unauthentic or invalid file.
+    /// missing, non-regular, oversized, undecodable, unauthentic, invalid or
+    /// below-minimum file.
     fn read_verified(&self, name: &str) -> Option<(SignedPatch, RulesConfig)> {
-        let bytes = read_capped(&self.path(name)).ok()?;
+        let bytes = read_capped(&self.path(name), false).ok()?;
         let patch = SignedPatch::decode(&bytes).ok()?;
         // current_version 0: on load we re-check authenticity, product and
-        // payload; anti-rollback against the device's own state is not
-        // meaningful here (versions are always >= 1 for real patches).
+        // payload; ordering between slots is decided by the caller.
         let verified = Verifier::new(self.public_key, self.product_id.clone(), 0)
             .verify(&patch)
             .ok()?;
+        if verified.patch_version < self.min_version {
+            return None;
+        }
         let rules = RulesConfig::decode(&verified.payload).ok()?;
         Some((patch, rules))
     }
 
     fn load_with_patch(&self) -> (InstalledRules, Option<SignedPatch>) {
-        if let Some((p, rules)) = self.read_verified(STATE_FILE) {
-            let version = p.manifest.patch_version;
-            return (InstalledRules { version, rules, source: StateSource::Current }, Some(p));
+        let cur = self.read_verified(STATE_FILE);
+        let prev = self.read_verified(PREV_FILE);
+        let pick = match (cur, prev) {
+            (Some(c), Some(p)) if p.0.manifest.patch_version > c.0.manifest.patch_version => {
+                Some((p, StateSource::RecoveredFromPrevious))
+            }
+            (Some(c), _) => Some((c, StateSource::Current)),
+            (None, Some(p)) => Some((p, StateSource::RecoveredFromPrevious)),
+            (None, None) => None,
+        };
+        match pick {
+            Some(((patch, rules), source)) => {
+                let version = patch.manifest.patch_version;
+                (InstalledRules { version, rules, source }, Some(patch))
+            }
+            None => (
+                InstalledRules { version: 0, rules: DEFAULT_RULES, source: StateSource::Default },
+                None,
+            ),
         }
-        if let Some((p, rules)) = self.read_verified(PREV_FILE) {
-            let version = p.manifest.patch_version;
-            return (
-                InstalledRules { version, rules, source: StateSource::RecoveredFromPrevious },
-                Some(p),
-            );
-        }
-        (
-            InstalledRules { version: 0, rules: DEFAULT_RULES, source: StateSource::Default },
-            None,
-        )
     }
 
-    /// The active rules. Never fails: falls back current -> previous ->
-    /// compiled-in defaults, re-verifying signatures at each step.
+    /// The active rules. Never fails: uses the highest verified version among
+    /// the current and previous state, else the compiled-in defaults.
     pub fn load(&self) -> InstalledRules {
         self.load_with_patch().0
     }
@@ -165,6 +207,7 @@ impl UpdateStore {
     /// Verify and install a patch given as bytes. On success returns the newly
     /// active rules; on any error the installed state is unchanged.
     pub fn apply_patch_bytes(&self, bytes: &[u8]) -> Result<InstalledRules, ApplyError> {
+        let _guard = APPLY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if bytes.len() as u64 > MAX_PATCH_FILE_BYTES {
             return Err(ApplyError::PatchTooLarge);
         }
@@ -173,16 +216,23 @@ impl UpdateStore {
         let patch = SignedPatch::decode(bytes)?;
         let verified = Verifier::new(self.public_key, self.product_id.clone(), current.version)
             .verify(&patch)?;
+        if verified.patch_version < self.min_version {
+            return Err(ApplyError::BelowMinimumVersion {
+                got: verified.patch_version,
+                min: self.min_version,
+            });
+        }
         let rules = RulesConfig::decode(&verified.payload)?;
 
         // Everything checked. Install atomically.
         fs::create_dir_all(&self.dir)?;
         if let Some(prev) = current_patch {
-            // Re-encode the VERIFIED current state as the fallback, so a corrupt
+            // Re-encode the VERIFIED active state as the fallback, so a corrupt
             // on-disk file can never displace a good previous state.
             atomic_write(&self.dir, &self.path(PREV_FILE), &prev.encode())?;
         }
         atomic_write(&self.dir, &self.path(STATE_FILE), &patch.encode())?;
+        cleanup_stale_temps(&self.dir);
 
         Ok(InstalledRules {
             version: verified.patch_version,
@@ -191,19 +241,34 @@ impl UpdateStore {
         })
     }
 
-    /// Verify and install a patch from a file. The file size is checked before
-    /// it is read, and the read itself is capped.
+    /// Verify and install a patch from an operator-supplied file. The path may
+    /// be a symlink, but its target must be a regular file; size is checked
+    /// before reading and the read itself is capped.
     pub fn apply_patch_file(&self, path: &Path) -> Result<InstalledRules, ApplyError> {
-        let bytes = read_capped(path)?;
+        let bytes = read_capped(path, true)?;
         self.apply_patch_bytes(&bytes)
     }
 }
 
-/// Read a file, refusing anything over [`MAX_PATCH_FILE_BYTES`] (checked via
-/// metadata first, then enforced on the read in case the file grows).
-fn read_capped(path: &Path) -> Result<Vec<u8>, ApplyError> {
+/// Read a regular file, refusing anything over [`MAX_PATCH_FILE_BYTES`].
+/// With `follow_symlinks = false` (state files) a symlink is refused outright;
+/// either way a FIFO/device/directory is refused BEFORE opening, so a planted
+/// FIFO cannot hang the reader. The open handle is re-checked (fstat) and the
+/// read is capped in case the file grows.
+fn read_capped(path: &Path, follow_symlinks: bool) -> Result<Vec<u8>, ApplyError> {
+    let meta = if follow_symlinks { fs::metadata(path)? } else { fs::symlink_metadata(path)? };
+    if !meta.file_type().is_file() {
+        return Err(ApplyError::NotARegularFile);
+    }
+    if meta.len() > MAX_PATCH_FILE_BYTES {
+        return Err(ApplyError::PatchTooLarge);
+    }
     let f = File::open(path)?;
-    if f.metadata()?.len() > MAX_PATCH_FILE_BYTES {
+    let fmeta = f.metadata()?;
+    if !fmeta.file_type().is_file() {
+        return Err(ApplyError::NotARegularFile);
+    }
+    if fmeta.len() > MAX_PATCH_FILE_BYTES {
         return Err(ApplyError::PatchTooLarge);
     }
     let mut buf = Vec::new();
@@ -214,20 +279,66 @@ fn read_capped(path: &Path) -> Result<Vec<u8>, ApplyError> {
     Ok(buf)
 }
 
-/// Write `data` to `dest` atomically: temp file in the same directory, fsync,
-/// rename over the destination, then fsync the directory (Unix) so the rename
-/// itself is durable.
+/// Suffix marking our temp files, used by cleanup.
+const TMP_SUFFIX: &str = ".tmp";
+
+/// Write `data` to `dest` atomically. The temp file has a unique name in the
+/// same directory and is created exclusively (O_EXCL via `create_new`), which
+/// never follows or reuses an existing path, so a planted symlink cannot
+/// redirect the write. Then fsync, rename over the destination (rename
+/// replaces a symlink itself rather than following it), and fsync the
+/// directory (Unix) so the rename is durable.
 fn atomic_write(dir: &Path, dest: &Path, data: &[u8]) -> std::io::Result<()> {
-    let mut tmp_name = dest.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
-    {
-        let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut last_err = None;
+    for _ in 0..8 {
+        let mut name = dest.as_os_str().to_owned();
+        name.push(format!(
+            ".{}.{}.{}{}",
+            std::process::id(),
+            nanos,
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            TMP_SUFFIX
+        ));
+        let tmp = PathBuf::from(name);
+        let mut f = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let result = f
+            .write_all(data)
+            .and_then(|_| f.sync_all())
+            .and_then(|_| fs::rename(&tmp, dest))
+            .and_then(|_| sync_dir(dir));
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        return result;
     }
-    fs::rename(&tmp, dest)?;
-    sync_dir(dir)
+    Err(last_err.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists)))
+}
+
+/// Best-effort removal of temp files left by a crashed install. Only touches
+/// names that start with a state-file name and end in `.tmp`; `remove_file`
+/// on a symlink removes the link itself, never its target.
+fn cleanup_stale_temps(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let ours = name.starts_with(STATE_FILE) || name.starts_with(PREV_FILE);
+        if ours && name.ends_with(TMP_SUFFIX) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -351,7 +462,7 @@ mod tests {
         // Validly SIGNED, but the payload would switch a detection off.
         assert!(matches!(
             st.apply_patch_bytes(&signed(&sk, 1, &bad)),
-            Err(ApplyError::Rules(RulesError::IndicatorNotPositive(
+            Err(ApplyError::Rules(RulesError::IndicatorOutOfRange(
                 EventKind::RemoteThreadInjection
             )))
         ));
@@ -450,5 +561,119 @@ mod tests {
         let mut engine = Engine::new(7);
         engine.set_rules(st.load().rules).unwrap();
         assert_eq!(engine.rules().block_at, 150.0);
+    }
+
+    #[test]
+    fn swapping_an_older_patch_into_the_current_slot_does_not_downgrade() {
+        let s = Scratch::new();
+        let (pk, sk) = generate_keypair();
+        let st = UpdateStore::new(&s.0, pk, PRODUCT);
+        let r1 = rules_with_block_at(110.0);
+        let r3 = rules_with_block_at(130.0);
+        fs::create_dir_all(&s.0).unwrap();
+        // Attacker puts genuine-but-old v1 in the current slot, v3 in prev.
+        fs::write(s.0.join(STATE_FILE), signed(&sk, 1, &r1)).unwrap();
+        fs::write(s.0.join(PREV_FILE), signed(&sk, 3, &r3)).unwrap();
+        let got = st.load();
+        assert_eq!((got.version, got.rules), (3, r3), "highest verified version must win");
+        assert_eq!(got.source, StateSource::RecoveredFromPrevious, "surfaced as a tamper signal");
+    }
+
+    #[test]
+    fn min_version_blocks_old_patches_on_disk_and_in_transit() {
+        let s = Scratch::new();
+        let (pk, sk) = generate_keypair();
+        let v2 = signed(&sk, 2, &rules_with_block_at(110.0));
+        UpdateStore::new(&s.0, pk, PRODUCT).apply_patch_bytes(&v2).unwrap();
+        let st = UpdateStore::new(&s.0, pk, PRODUCT).with_min_version(3);
+        assert_eq!(st.load().source, StateSource::Default, "stored v2 is below the floor");
+        assert_eq!(
+            st.apply_patch_bytes(&v2),
+            Err(ApplyError::BelowMinimumVersion { got: 2, min: 3 })
+        );
+        let v3 = signed(&sk, 3, &rules_with_block_at(120.0));
+        assert_eq!(st.apply_patch_bytes(&v3).unwrap().version, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_state_file_is_not_followed() {
+        let s = Scratch::new();
+        let (pk, sk) = generate_keypair();
+        fs::create_dir_all(&s.0).unwrap();
+        let elsewhere = s.0.join("elsewhere.jssp");
+        fs::write(&elsewhere, signed(&sk, 5, &rules_with_block_at(130.0))).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, s.0.join(STATE_FILE)).unwrap();
+        let got = UpdateStore::new(&s.0, pk, PRODUCT).load();
+        assert_eq!(got.source, StateSource::Default, "state must not be read through a symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_temp_symlink_cannot_redirect_the_write() {
+        let s = Scratch::new();
+        let (pk, sk) = generate_keypair();
+        fs::create_dir_all(&s.0).unwrap();
+        let victim = s.0.join("victim.txt");
+        fs::write(&victim, b"precious").unwrap();
+        // The naive temp name from the previous design.
+        std::os::unix::fs::symlink(&victim, s.0.join(format!("{STATE_FILE}.tmp"))).unwrap();
+        let st = UpdateStore::new(&s.0, pk, PRODUCT);
+        st.apply_patch_bytes(&signed(&sk, 1, &rules_with_block_at(110.0))).unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"precious", "victim must be untouched");
+        assert!(fs::symlink_metadata(s.0.join(STATE_FILE)).unwrap().file_type().is_file());
+        assert_eq!(st.load().version, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_state_path_does_not_hang_load() {
+        let s = Scratch::new();
+        let (pk, _) = generate_keypair();
+        fs::create_dir_all(&s.0).unwrap();
+        let fifo = s.0.join(STATE_FILE);
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !matches!(made, Ok(st) if st.success()) {
+            eprintln!("mkfifo unavailable; skipping");
+            return;
+        }
+        let dir = s.0.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateStore::new(&dir, pk, PRODUCT).load());
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("load() hung on a FIFO");
+        assert_eq!(got.source, StateSource::Default);
+    }
+
+    #[test]
+    fn a_directory_at_a_state_path_fails_cleanly_without_changes() {
+        let s = Scratch::new();
+        let (pk, sk) = generate_keypair();
+        let st = UpdateStore::new(&s.0, pk, PRODUCT);
+        st.apply_patch_bytes(&signed(&sk, 1, &rules_with_block_at(110.0))).unwrap();
+        fs::remove_file(s.0.join(PREV_FILE)).ok();
+        fs::create_dir_all(s.0.join(PREV_FILE)).unwrap(); // hostile directory
+        let res = st.apply_patch_bytes(&signed(&sk, 2, &rules_with_block_at(120.0)));
+        assert!(matches!(res, Err(ApplyError::Io(_))), "got {res:?}");
+        assert_eq!(st.load().version, 1, "current rules unchanged");
+    }
+
+    #[test]
+    fn stale_temp_files_are_cleaned_up() {
+        let s = Scratch::new();
+        let (pk, sk) = generate_keypair();
+        fs::create_dir_all(&s.0).unwrap();
+        let stale = s.0.join(format!("{STATE_FILE}.123.456.0.tmp"));
+        fs::write(&stale, b"half-written").unwrap();
+        let keep = s.0.join("unrelated.tmp");
+        fs::write(&keep, b"not ours").unwrap();
+        UpdateStore::new(&s.0, pk, PRODUCT)
+            .apply_patch_bytes(&signed(&sk, 1, &rules_with_block_at(110.0)))
+            .unwrap();
+        assert!(!stale.exists(), "our stale temp is removed");
+        assert!(keep.exists(), "unrelated files are left alone");
     }
 }

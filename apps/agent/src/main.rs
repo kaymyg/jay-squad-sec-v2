@@ -23,7 +23,9 @@ use jay_squad_sec::event::{Event, EventKind};
 use jay_squad_sec::risk::PolicyAction;
 use jay_squad_sec::rtid::Rtid;
 use jay_squad_sec::telemetry::{platform_sensor, suspicious_path};
-use std::collections::{HashMap, HashSet};
+// BTree collections: ordered iteration keeps event publish order (and which
+// process an event is attributed to) identical from run to run.
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +42,11 @@ const AGENT_PRODUCT_ID: &str = "jay-squad-sec-agent";
 /// While this is `Some`, `--pubkey-file` is ignored, so whoever controls the
 /// agent's command line cannot point it at their own key.
 const EMBEDDED_PUBLIC_KEY: Option<[u8; 32]> = None;
+
+/// Oldest rules patch version this build accepts, on disk or in transit. Raise
+/// it to the latest shipped patch version in each release so that even if the
+/// state directory is wiped, an older patch can never be re-applied.
+const MIN_RULES_VERSION: u64 = 0;
 
 struct Tracked {
     rtid: Rtid,
@@ -92,7 +99,7 @@ fn main() {
     load_rules(&mut engine, &mut log, update_dir.as_deref(), pubkey_file.as_deref(), apply_patch.as_deref());
 
     // --- Baseline: adopt everything already running, quietly. ---
-    let mut tracked: HashMap<u32, Tracked> = HashMap::new();
+    let mut tracked: BTreeMap<u32, Tracked> = BTreeMap::new();
     for p in sensor.processes() {
         if p.pid == own_pid {
             continue;
@@ -106,10 +113,10 @@ fn main() {
     engine.tick(0);
     println!("[agent] baseline: {} processes enrolled at L0 (quiet)", tracked.len());
 
-    let mut autorun_baseline: HashSet<String> = sensor.autoruns().into_iter().collect();
-    let mut seen_conns: HashSet<(u32, String)> = HashSet::new();
+    let mut autorun_baseline: BTreeSet<String> = sensor.autoruns().into_iter().collect();
+    let mut seen_conns: BTreeSet<(u32, String)> = BTreeSet::new();
     let mut sig_pending: Vec<(u32, String)> = Vec::new();
-    let mut sig_done: HashSet<String> = HashSet::new();
+    let mut sig_done: BTreeSet<String> = BTreeSet::new();
     let mut audit_printed = engine.audit.len();
     let mut polls: u64 = 0;
     let mut last_heartbeat = Instant::now();
@@ -121,7 +128,7 @@ fn main() {
 
         // 1. Process arrivals / departures.
         let procs = sensor.processes();
-        let current: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
+        let current: BTreeSet<u32> = procs.iter().map(|p| p.pid).collect();
 
         let new_pids: Vec<u32> = procs
             .iter()
@@ -164,7 +171,7 @@ fn main() {
             .collect();
         if !batch.is_empty() {
             let path_list: Vec<String> = batch.iter().map(|(_, e)| e.clone()).collect();
-            let results: HashMap<String, bool> =
+            let results: BTreeMap<String, bool> =
                 sensor.check_unsigned(&path_list).into_iter().collect();
             for (pid, exe) in &batch {
                 sig_done.insert(exe.clone());
@@ -315,7 +322,7 @@ fn load_rules(
         }
         return;
     };
-    let store = UpdateStore::new(dir, key, AGENT_PRODUCT_ID);
+    let store = UpdateStore::new(dir, key, AGENT_PRODUCT_ID).with_min_version(MIN_RULES_VERSION);
     if let Some(patch) = apply_patch {
         match store.apply_patch_file(std::path::Path::new(patch)) {
             Ok(i) => say(log, format!("[update] patch applied: rules v{}", i.version)),
@@ -328,7 +335,10 @@ fn load_rules(
             let src = match installed.source {
                 StateSource::Default => "compiled-in defaults",
                 StateSource::Current => "verified update",
-                StateSource::RecoveredFromPrevious => "previous verified update (current state was invalid)",
+                StateSource::RecoveredFromPrevious => {
+                    say(log, "[update] WARNING: current rules state was missing, invalid, tampered or older than the fallback; possible tampering with the state directory".into());
+                    "previous verified update"
+                }
             };
             say(log, format!(
                 "[update] active rules v{} from {src}; block at risk {}",
