@@ -17,3 +17,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 jay-squad-sec-core = { path = "../core" }
 jay-squad-sec-protocol = { path = "../protocol" }
+jay-squad-sec-apply = { path = "../apply" }
