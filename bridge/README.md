@@ -129,6 +129,21 @@ accept. The storage directory must be an absolute path (use
 Rejections return `ERR_UPDATE_REJECTED` and queue an alert naming the reason
 (bad signature, wrong product, rollback, below minimum, unsafe rules).
 
+Each engine is bound to the first storage directory it is given; any other
+directory is refused with `ERR_INVALID`, so anti-rollback cannot be reset by
+pointing the engine at an empty directory. A load never activates rules older
+than those already active in the engine. Patch versions above `u32::MAX` are
+refused even when signed. If state files exist but none verify, the engine
+falls back to the built-in defaults and raises a tampering alert instead of
+behaving like a fresh install.
+
+Known limit: the high-water mark lives in the engine, not in tamper-proof
+storage. A brand-new engine (for example after the app's data is wiped) trusts
+whatever verified state is on disk, bounded below only by
+`JSS_ANDROID_MIN_RULES_VERSION`. Raise that each release; a Keystore-backed
+high-water mark is planned. Several engines sharing one directory each keep
+their own active rules until they reload; the app should run one engine.
+
 The update payload is decoded as `RulesConfig` and fully validated by the
 core before installation and again before activation. The patch container is
 Ed25519-verified for the Android product ID, checked against the installed

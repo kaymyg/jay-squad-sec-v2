@@ -80,7 +80,15 @@ pub enum UpdateError {
     /// A patch file could not be decoded (bad magic, wrong format version,
     /// truncated, inconsistent lengths, or non-UTF-8 product id).
     MalformedPatchFile,
+    /// Patch version above [`MAX_PATCH_VERSION`]. Refused even when signed:
+    /// a huge version would freeze all future updates and cannot be reported
+    /// through a signed 64-bit (JNI `long`) return value.
+    VersionTooLarge { got: u64 },
 }
+
+/// Highest patch version any verifier accepts (`u32::MAX`), matching the cap
+/// in the builder's signing tool.
+pub const MAX_PATCH_VERSION: u64 = u32::MAX as u64;
 
 impl core::fmt::Display for UpdateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -99,6 +107,9 @@ impl core::fmt::Display for UpdateError {
                 write!(f, "patch version {got} is not newer than installed {current}")
             }
             UpdateError::MalformedPatchFile => write!(f, "patch file is malformed"),
+            UpdateError::VersionTooLarge { got } => {
+                write!(f, "patch version {got} exceeds the maximum {MAX_PATCH_VERSION}")
+            }
         }
     }
 }
@@ -257,6 +268,9 @@ impl Verifier {
         }
         if m.product_id != self.product_id {
             return Err(UpdateError::WrongProduct);
+        }
+        if m.patch_version > MAX_PATCH_VERSION {
+            return Err(UpdateError::VersionTooLarge { got: m.patch_version });
         }
         if m.payload_len != patch.payload.len() as u64 {
             return Err(UpdateError::LengthMismatch);
@@ -485,5 +499,14 @@ mod tests {
             signature: [0xAB; 64],
         };
         let _ = v.verify(&patch); // all-zero key, junk sig: must not panic
+    }
+
+    #[test]
+    fn versions_above_u32_max_are_refused_even_when_signed() {
+        let (pk, sk) = generate_keypair();
+        let v = Verifier::new(pk, "p", 0);
+        assert!(v.verify(&sign_patch(&sk, "p", MAX_PATCH_VERSION, vec![1]).unwrap()).is_ok());
+        let big = sign_patch(&sk, "p", MAX_PATCH_VERSION + 1, vec![1]).unwrap();
+        assert_eq!(v.verify(&big), Err(UpdateError::VersionTooLarge { got: MAX_PATCH_VERSION + 1 }));
     }
 }

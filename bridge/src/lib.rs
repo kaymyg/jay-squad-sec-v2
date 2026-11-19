@@ -123,6 +123,14 @@ struct EngineState {
     retired_order: VecDeque<u32>,
     alerts: VecDeque<String>,
     alerts_dropped: u64,
+    /// Version of the rules active in this engine (0 = compiled-in defaults).
+    /// Activation never goes below it, so a stale directory cannot downgrade
+    /// a running engine.
+    rules_version: u64,
+    /// Storage directory this engine's rules are bound to. The first update
+    /// call fixes it; any other directory is refused, so anti-rollback cannot
+    /// be reset by pointing the engine at a fresh directory.
+    rules_dir: Option<PathBuf>,
 }
 
 impl EngineState {
@@ -269,6 +277,8 @@ pub fn engine_new(boot_nonce: u64) -> JssHandle {
                 retired_order: VecDeque::new(),
                 alerts: VecDeque::new(),
                 alerts_dropped: 0,
+                rules_version: 0,
+                rules_dir: None,
             }),
         };
         reg.live.insert(id, Arc::new(inst));
@@ -506,6 +516,26 @@ fn decode_public_key(encoded: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
+/// Bind the engine to one storage directory: the first call fixes it, and a
+/// different directory afterwards is refused with [`ERR_INVALID`].
+fn bind_rules_dir(state: &mut EngineState, dir: &str) -> Result<(), i32> {
+    let dir = PathBuf::from(dir);
+    match &state.rules_dir {
+        Some(bound) if *bound != dir => {
+            state.push_alert(
+                "[update] refused: rules storage directory differs from the one this engine is bound to"
+                    .to_string(),
+            );
+            Err(ERR_INVALID)
+        }
+        Some(_) => Ok(()),
+        None => {
+            state.rules_dir = Some(dir);
+            Ok(())
+        }
+    }
+}
+
 /// Load the highest verified Android rules patch from app-private storage.
 /// The embedded builder key and product ID are fixed by this native build.
 pub fn load_signed_rules(handle: JssHandle, storage_dir: &[u8]) -> Result<u64, i32> {
@@ -514,11 +544,30 @@ pub fn load_signed_rules(handle: JssHandle, storage_dir: &[u8]) -> Result<u64, i
         let store = android_update_store(&dir)?;
         let inst = lookup(handle)?;
         let mut state = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        bind_rules_dir(&mut state, &dir)?;
         let installed = store.load();
+        if installed.source == jay_squad_sec_apply::StateSource::Default
+            && store.state_files_present()
+        {
+            state.push_alert(
+                "[update] stored rules failed verification (tampered, corrupt or below minimum); \
+                 not using them"
+                    .to_string(),
+            );
+        }
+        let active = state.rules_version;
+        if installed.version < active {
+            state.push_alert(format!(
+                "[update] refused to downgrade active rules v{active} to stored v{}",
+                installed.version
+            ));
+            return Err(ERR_UPDATE_REJECTED);
+        }
         state
             .engine
             .set_rules(installed.rules)
             .map_err(|_| ERR_UPDATE_REJECTED)?;
+        state.rules_version = installed.version;
         if installed.source != jay_squad_sec_apply::StateSource::Current && installed.version > 0 {
             state.push_alert(format!(
                 "[update] Android rules recovered from previous verified state, version {}",
@@ -545,6 +594,7 @@ pub fn apply_signed_rules(
         let store = android_update_store(&dir)?;
         let inst = lookup(handle)?;
         let mut state = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        bind_rules_dir(&mut state, &dir)?;
         let installed = match store.apply_patch_bytes(patch_bytes) {
             Ok(value) => value,
             Err(e) => {
@@ -556,12 +606,17 @@ pub fn apply_signed_rules(
                 return Err(ERR_UPDATE_REJECTED);
             }
         };
-        // apply_patch_bytes has already decoded and validated the exact RulesConfig.
-        // set_rules validates again before changing the live engine.
-        state
-            .engine
-            .set_rules(installed.rules)
-            .map_err(|_| ERR_UPDATE_REJECTED)?;
+        // apply_patch_bytes has already decoded and validated the exact RulesConfig,
+        // so this cannot fail today; if it ever did, the disk holds the new
+        // version while the engine keeps its old rules, and we say so.
+        if state.engine.set_rules(installed.rules).is_err() {
+            state.push_alert(format!(
+                "[update] rules v{} installed but could not be activated; restart to retry",
+                installed.version
+            ));
+            return Err(ERR_UPDATE_REJECTED);
+        }
+        state.rules_version = installed.version;
         state.push_alert(format!(
             "[update] Android rules v{} verified, installed and activated",
             installed.version
