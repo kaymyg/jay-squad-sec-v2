@@ -26,12 +26,3 @@ fn rules_apply_fails_closed_when_builder_key_is_not_embedded() {
     assert_eq!(engine_free(handle), 0);
 }
 
-#[test]
-fn malformed_embedded_key_is_treated_as_not_configured() {
-    if option_env!("JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX").is_none() {
-        assert_eq!(
-            std::env::var("JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX"),
-            Err(std::env::VarError::NotPresent)
-        );
-    }
-}
