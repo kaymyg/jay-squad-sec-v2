@@ -14,13 +14,17 @@ name = "jay_squad_sec_update"
 path = "src/lib.rs"
 
 [features]
-# Dev default includes signing so tests and the offline builder tool work.
-# The shipped product/Android build must use default-features = false:
-# verify-only, no signing code, no RNG — smallest footprint and no secret path.
-# Only `signing` pulls ed25519-compact's RNG (getrandom/libc); a verify-only
-# build drops those transitive deps entirely.
-default = ["signing"]
+# Product-safe default: verify-only. No signing code, no RNG, so no build of
+# the shipped product (agent, apply, bridge) can accidentally include them.
+# Signing is enabled explicitly by the offline builder tool (tools/signer) and
+# by test builds via the self dev-dependency below.
+default = []
 signing = ["ed25519-compact/random"]
 
 [dependencies]
 ed25519-compact = { version = "=2.1.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Enables `signing` for this crate's own tests only (resolver 2 keeps dev-dep
+# features out of normal builds).
+jay-squad-sec-update = { path = ".", features = ["signing"] }
