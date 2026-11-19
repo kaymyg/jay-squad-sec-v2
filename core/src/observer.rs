@@ -26,6 +26,11 @@ impl ObservationLevel {
 }
 
 fn raw_level(score: f32) -> ObservationLevel {
+    // A non-finite score is unevaluable; observe at maximum depth rather than
+    // falling through to L0, mirroring the risk engine's fail-closed stance.
+    if !score.is_finite() {
+        return ObservationLevel::L4Containment;
+    }
     match score {
         s if s >= 75.0 => ObservationLevel::L4Containment,
         s if s >= 50.0 => ObservationLevel::L3DeepCorrelation,
