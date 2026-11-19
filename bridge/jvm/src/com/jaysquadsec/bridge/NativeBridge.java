@@ -25,7 +25,7 @@ public final class NativeBridge {
     public static final int ERR_UPDATE_REJECTED = 11;
 
     /** ABI version this Java/Kotlin code was written against. */
-    public static final int EXPECTED_ABI = 3;
+    public static final int EXPECTED_ABI = 4;
 
     /** Returns a handle, or 0 if the engine limit is reached. */
     public static native long nativeNew(long bootNonce);

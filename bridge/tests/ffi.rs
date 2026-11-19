@@ -51,9 +51,9 @@ fn c_take(h: JssHandle, cap: usize) -> (i32, String) {
 const APP: &[u8] = b"com.example.app:sha256:ab12";
 
 #[test]
-fn reports_abi_v3_and_creates_a_handle() {
+fn reports_abi_v4_and_creates_a_handle() {
     let _g = lock();
-    assert_eq!(jss_bridge_abi_version(), 3);
+    assert_eq!(jss_bridge_abi_version(), 4);
     let h = jss_engine_new(7);
     assert_ne!(h, 0);
     assert_eq!(jss_engine_free(h), OK);
