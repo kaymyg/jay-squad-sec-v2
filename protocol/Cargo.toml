@@ -1,0 +1,15 @@
+[package]
+name = "jay-squad-sec-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Versioned, validated event and response schemas for the Jay Squad Sec engine boundary"
+
+# The narrow, versioned interface between front ends (Android via JNI, sensor
+# adapters) and the core engine. Nothing reaches the engine until it passes
+# validate(). Depends only on core; no platform code, no third-party crates.
+[lib]
+name = "jay_squad_sec_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+jay-squad-sec-core = { path = "../core" }
