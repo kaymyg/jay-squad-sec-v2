@@ -163,6 +163,8 @@ sleep 6
 no_crash "after grant"
 find_text "$SHORT access granted to" || fail "grant of $SHORT to $TARGET not shown"
 grep -qF "($TARGET)" "$OUT/ui-$step.xml" || fail "package name not shown with the change"
+# The native engine rated it: one new permission alone is Low (score 15).
+find_text "Risk: Low (engine score 15)" || fail "engine verdict not shown for the grant"
 adb shell cmd jobscheduler run -f "$PKG" 4201
 sleep 8
 adb shell dumpsys notification --noredact | grep -q "pkg=$PKG" || fail "no notification posted for the grant"
