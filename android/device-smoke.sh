@@ -22,6 +22,8 @@ fail() {
   adb exec-out screencap -p > "$OUT/failure.png" || true
   adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 && adb shell cat /sdcard/ui.xml > "$OUT/failure-ui.xml" || true
   adb logcat -d > "$OUT/logcat.txt" || true
+  echo "--- texts on screen at failure:"
+  grep -o 'text="[^"]*"' "$OUT/failure-ui.xml" 2>/dev/null | grep -v 'text=""' | head -60 || true
   exit 1
 }
 
@@ -44,16 +46,16 @@ no_crash() {
 # matching dump in $OUT/ui-$step.xml. Returns 1 if not found.
 find_text() {
   local text=$1 i
-  for i in 0 1 2 3; do
+  for i in 0 1 2 3 4 5; do
     ui > /dev/null
     grep -qF "$text" "$OUT/ui-$step.xml" && return 0
-    adb shell input swipe 500 1600 500 600 300
+    adb shell input swipe "$SX" "$SY_LOW" "$SX" "$SY_HIGH" 300
     sleep 1
   done
   return 1
 }
 
-scroll_top() { for _ in 1 2 3 4; do adb shell input swipe 500 600 500 1600 200; done; sleep 1; }
+scroll_top() { for _ in 1 2 3 4 5; do adb shell input swipe "$SX" "$SY_HIGH" "$SX" "$SY_LOW" 200; done; sleep 1; }
 
 tap_text() {  # tap the centre of the node whose text starts with $2
   local xml=$1 text=$2
@@ -89,6 +91,10 @@ PY
 adb wait-for-device
 adb shell 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done'
 adb install -r "$APK"
+# Swipe coordinates from the real screen size (emulator screens vary).
+read -r W H < <(adb shell wm size | tr -d '\r' | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -1)
+SX=$((W / 2)); SY_LOW=$((H * 3 / 4)); SY_HIGH=$((H / 4))
+echo "screen ${W}x${H}"
 adb logcat -c
 adb logcat -b crash -c || true
 
