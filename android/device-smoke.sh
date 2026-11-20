@@ -59,6 +59,7 @@ scroll_top() { for _ in 1 2 3 4 5; do adb shell input swipe "$SX" "$SY_HIGH" "$S
 
 tap_text() {  # tap the centre of the node whose text starts with $2
   local xml=$1 text=$2
+  local x="" y=""
   read -r x y < <(python3 - "$xml" "$text" <<'PYTEXT'
 import re, sys, html
 xml, want = sys.argv[1], sys.argv[2]
@@ -68,13 +69,14 @@ for node in re.findall(r"<node [^>]*>", open(xml).read()):
         a, b, c, d = map(int, re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node).groups())
         print((a + c) // 2, (b + d) // 2); break
 PYTEXT
-)
+) || true
   [ -n "${x:-}" ] || fail "text '$text' not found to tap"
   adb shell input tap "$x" "$y"
 }
 
 tap_resource() {  # tap the centre of the node with this resource-id suffix
   local xml=$1 id=$2
+  local x="" y=""
   read -r x y < <(python3 - "$xml" "$id" <<'PY'
 import re, sys
 xml, rid = sys.argv[1], sys.argv[2]
@@ -83,7 +85,7 @@ for node in re.findall(r"<node [^>]*>", open(xml).read()):
         a, b, c, d = map(int, re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node).groups())
         print((a + c) // 2, (b + d) // 2); break
 PY
-)
+) || true
   [ -n "${x:-}" ] || fail "button $id not found"
   adb shell input tap "$x" "$y"
 }
@@ -187,6 +189,7 @@ relaunch() { adb shell input keyevent KEYCODE_HOME; sleep 1; adb shell am start 
 adb shell pm grant "$TARGET" "$PERM"
 relaunch
 find_text "$SHORT access granted to" || fail "grant not shown before accept"
+find_text "Accept" || fail "Accept button not found"
 tap_text "$OUT/ui-$step.xml" "Accept"
 sleep 3
 adb shell pm revoke "$TARGET" "$PERM"
