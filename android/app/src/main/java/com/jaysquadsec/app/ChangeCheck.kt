@@ -27,6 +27,7 @@ import java.util.concurrent.Executors
 object ChangeCheck {
     private const val LEDGER_FILE = "notified.v1"
     private const val LAST_RUN_FILE = "last-check"
+    private const val LAST_ERROR_FILE = "last-check-error"
     private val lock = Any()
 
     fun run(context: Context) {
@@ -70,8 +71,21 @@ object ChangeCheck {
                 }
             }
             atomicWrite(dir, LAST_RUN_FILE, System.currentTimeMillis().toString())
+            File(dir, LAST_ERROR_FILE).delete()
         }
     }
+
+    /** Called by the job when [run] throws, so the screen can say so honestly. */
+    fun recordFailure(context: Context, failure: Throwable) {
+        runCatching {
+            atomicWrite(context.filesDir, LAST_ERROR_FILE, failure.javaClass.simpleName.take(60))
+        }
+    }
+
+    /** Short reason the last background check failed, or null. */
+    fun lastError(context: Context): String? =
+        runCatching { File(context.filesDir, LAST_ERROR_FILE).readText().trim().take(60) }
+            .getOrNull()?.filter { it.isLetterOrDigit() }?.ifEmpty { null }
 
     /** Time of the last completed background check, or null if none yet. */
     fun lastRunMs(context: Context): Long? =
@@ -102,6 +116,7 @@ class ChangeCheckJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         executor.execute {
             runCatching { ChangeCheck.run(applicationContext) }
+                .onFailure { ChangeCheck.recordFailure(applicationContext, it) }
             jobFinished(params, false)
         }
         return true
@@ -156,12 +171,19 @@ object Notifier {
     fun show(context: Context, title: String, text: String, lines: List<String>): Boolean {
         if (!canNotify(context)) return false
         val nm = context.getSystemService(NotificationManager::class.java) ?: return false
+        // If the user had blocked the old channel, keep the new one blocked:
+        // replacing a channel must never silently turn alerts back on.
+        val oldBlocked = nm.getNotificationChannel(OLD_CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE
         nm.deleteNotificationChannel(OLD_CHANNEL)
         // HIGH: a small banner at the top for a few seconds, then it stays in
         // the shade. Never full screen (no full-screen intent is used).
         // Sound: the phone's default notification tone.
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Security alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+            NotificationChannel(
+                CHANNEL,
+                "Security alerts",
+                if (oldBlocked) NotificationManager.IMPORTANCE_NONE else NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
                 description = "An app gained sensitive access (SMS, microphone, camera, location...) " +
                     "or its signing certificate changed"
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
@@ -204,6 +226,8 @@ object Notifier {
             .setColor(0xFF1E88E5.toInt())
             .setAutoCancel(true)
             .build()
+        // Re-check now that the channel exists: it may have been created blocked.
+        if (!canNotify(context)) return false
         return runCatching { nm.notify(ID, n) }.isSuccess
     }
 }

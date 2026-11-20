@@ -6,17 +6,36 @@ package com.jaysquadsec.app
  * Strip control, format and separator characters, collapse whitespace and cap
  * the length. Pure Kotlin, unit-tested.
  */
+// Characters that render as blank but are not classed as spaces.
+private val BLANK_FILLERS = setOf('\u115F', '\u1160', '\u2800', '\u3164', '\uFFA0')
+
 internal fun safeLabel(raw: String?, max: Int = 40): String {
+    var marks = 0
     val cleaned = buildString {
         raw.orEmpty().forEach { c ->
-            when (Character.getType(c).toByte()) {
-                Character.CONTROL, Character.FORMAT, Character.LINE_SEPARATOR,
-                Character.PARAGRAPH_SEPARATOR, Character.SURROGATE, Character.PRIVATE_USE,
-                Character.UNASSIGNED -> append(' ')
-                else -> append(c)
+            val type = Character.getType(c).toByte()
+            when {
+                c in BLANK_FILLERS -> append(' ')
+                type == Character.CONTROL || type == Character.FORMAT ||
+                    type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR ||
+                    type == Character.SPACE_SEPARATOR || type == Character.SURROGATE ||
+                    type == Character.PRIVATE_USE || type == Character.UNASSIGNED -> {
+                    marks = 0
+                    append(' ')
+                }
+                // Real scripts use a mark or two per letter; stacks are a
+                // spoofing trick that draws over neighbouring lines.
+                type == Character.NON_SPACING_MARK || type == Character.ENCLOSING_MARK ||
+                    type == Character.COMBINING_SPACING_MARK -> {
+                    if (++marks <= 2) append(c)
+                }
+                else -> {
+                    marks = 0
+                    append(c)
+                }
             }
         }
-    }.trim().replace(Regex("\\s+"), " ")
+    }.trim().replace(Regex("(?U)\\s+"), " ")
     if (cleaned.isEmpty()) return "(no name)"
     return if (cleaned.length <= max) cleaned else cleaned.take(max - 1).trimEnd() + "…"
 }

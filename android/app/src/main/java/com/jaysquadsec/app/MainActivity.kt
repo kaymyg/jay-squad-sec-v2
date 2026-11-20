@@ -107,6 +107,9 @@ class MainActivity : ComponentActivity() {
                     val scope = rememberCoroutineScope()
                     // One refresh or accept at a time; a new refresh cancels the old one.
                     val uiMutex = remember { Mutex() }
+                    // Bumped each time a scan is published; Accept only applies to the
+                    // snapshot that was on screen when it was tapped.
+                    var snapshot by remember { mutableStateOf(0) }
                     val refreshJob = remember { arrayOfNulls<Job>(1) }
 
                     suspend fun refresh() {
@@ -147,6 +150,7 @@ class MainActivity : ComponentActivity() {
                             changes = found
                             baselineNote = note
                             baselineApps = base
+                            snapshot++
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
@@ -165,13 +169,23 @@ class MainActivity : ComponentActivity() {
                     }
 
                     fun accept(packages: Set<String>, note: String?) {
+                        val shownSnapshot = snapshot
                         scope.launch {
                             uiMutex.withLock {
-                                val updated = InventoryDiff.acceptPackages(baselineApps, currentFp, packages)
-                                withContext(Dispatchers.IO) { baselineStore.save(updated.values) }
-                                baselineApps = updated
-                                changes = InventoryDiff.compare(updated, currentFp)
-                                if (note != null) baselineNote = note
+                                // A newer scan replaced what the user saw: do not accept
+                                // changes they have not seen; the new list is on screen.
+                                if (snapshot != shownSnapshot) return@withLock
+                                try {
+                                    val updated = InventoryDiff.acceptPackages(baselineApps, currentFp, packages)
+                                    withContext(Dispatchers.IO) { baselineStore.save(updated.values) }
+                                    baselineApps = updated
+                                    changes = InventoryDiff.compare(updated, currentFp)
+                                    if (note != null) baselineNote = note
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (failure: Exception) {
+                                    error = "Could not save: ${failure.message ?: "storage error"}"
+                                }
                             }
                         }
                     }
@@ -201,6 +215,7 @@ class MainActivity : ComponentActivity() {
                                 Text("Background checks", style = MaterialTheme.typography.titleSmall)
                                 val tick = resumeTick.intValue
                                 val last = remember(tick) { ChangeCheck.lastRunMs(applicationContext) }
+                                val lastError = remember(tick) { ChangeCheck.lastError(applicationContext) }
                                 val notifyOk = remember(tick) { Notifier.canNotify(applicationContext) }
                                 val restricted = remember(tick) { backgroundRestricted() }
                                 Text(
@@ -213,7 +228,13 @@ class MainActivity : ComponentActivity() {
                                         } ?: "not yet"),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                if (last != null && System.currentTimeMillis() - last > 3L * 60 * 60 * 1000) {
+                                if (lastError != null) {
+                                    Text(
+                                        "The last background check failed ($lastError). It will retry.",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                } else if (last != null && System.currentTimeMillis() - last > 3L * 60 * 60 * 1000) {
                                     Text(
                                         "The background check has not run for over 3 hours. Android may be " +
                                             "stopping it: set Battery to No restriction in this app's settings.",
