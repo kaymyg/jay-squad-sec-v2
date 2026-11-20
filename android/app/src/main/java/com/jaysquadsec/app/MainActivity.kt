@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val inventory = PackageInventoryReader(applicationContext)
+        val baselineStore = BaselineStore(applicationContext.filesDir)
 
         setContent {
             MaterialTheme(colorScheme = lightColorScheme()) {
@@ -45,13 +46,40 @@ class MainActivity : ComponentActivity() {
                     var loading by remember { mutableStateOf(true) }
                     var error by remember { mutableStateOf<String?>(null) }
                     var engine by remember { mutableStateOf<EngineSelfTest.Result?>(null) }
+                    var changes by remember { mutableStateOf<List<InventoryChange>>(emptyList()) }
+                    var baselineNote by remember { mutableStateOf<String?>(null) }
+                    val labels = remember(apps) { apps.associate { it.packageName to it.label } }
                     val scope = rememberCoroutineScope()
 
                     suspend fun refresh() {
                         loading = true
                         error = null
                         try {
-                            apps = withContext(Dispatchers.IO) { inventory.readLaunchableApps() }
+                            val scanned = withContext(Dispatchers.IO) { inventory.readLaunchableApps() }
+                            apps = scanned
+                            val current = scanned.map { AppFingerprint.of(it) }
+                            val (found, note) = withContext(Dispatchers.IO) {
+                                when (val stored = baselineStore.load()) {
+                                    is BaselineStore.Loaded.Missing -> {
+                                        baselineStore.save(current)
+                                        emptyList<InventoryChange>() to ("Baseline recorded for ${current.size} apps. " +
+                                            "Future scans will report changes against it.")
+                                    }
+                                    is BaselineStore.Loaded.Corrupt -> {
+                                        baselineStore.save(current)
+                                        emptyList<InventoryChange>() to ("The saved baseline was unreadable (corrupted or altered), " +
+                                            "so a new one was recorded. Changes before now cannot be shown.")
+                                    }
+                                    is BaselineStore.Loaded.Ok -> {
+                                        InventoryDiff.compare(
+                                            stored.apps,
+                                            current.associateBy { it.packageName },
+                                        ) to null
+                                    }
+                                }
+                            }
+                            changes = found
+                            baselineNote = note
                         } catch (failure: Exception) {
                             error = failure.message ?: "Inventory scan failed"
                         } finally {
@@ -111,6 +139,43 @@ class MainActivity : ComponentActivity() {
                                 "This list is not a complete device inventory.",
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        if (!loading && error == null) {
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(Modifier.padding(16.dp)) {
+                                    Text("Changes since baseline", style = MaterialTheme.typography.titleMedium)
+                                    Spacer(Modifier.height(6.dp))
+                                    baselineNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                                    if (baselineNote == null && changes.isEmpty()) {
+                                        Text("No changes.", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    changes.take(8).forEach { change ->
+                                        val name = labels[change.packageName] ?: change.packageName
+                                        Text(
+                                            describe(change, name),
+                                            color = if (change.severity >= 3) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                    if (changes.size > 8) Text("+ ${changes.size - 8} more", style = MaterialTheme.typography.bodySmall)
+                                    if (changes.isNotEmpty()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Button(onClick = {
+                                            scope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    baselineStore.save(apps.map { AppFingerprint.of(it) })
+                                                }
+                                                changes = emptyList()
+                                                baselineNote = "Changes accepted as the new baseline."
+                                            }
+                                        }) { Text("Accept as new baseline") }
+                                    }
+                                }
+                            }
+                        }
                         if (loading) {
                             CircularProgressIndicator()
                         } else if (error != null) {
@@ -153,4 +218,21 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+private fun describe(change: InventoryChange, name: String): String = when (change) {
+    is InventoryChange.SignerChanged ->
+        "Signing certificate changed: $name. It was reinstalled from a different source " +
+            "or its developer rotated the key. Check where it came from."
+    is InventoryChange.PermissionGranted ->
+        "New access: $name can now use ${SensitivePermissions.shortName(change.permission)}"
+    is InventoryChange.AppAdded ->
+        if (change.sensitive.isEmpty()) {
+            "New app: $name"
+        } else {
+            "New app: $name, with ${change.sensitive.joinToString { SensitivePermissions.shortName(it) }}"
+        }
+    is InventoryChange.PermissionRevoked ->
+        "Access removed: $name no longer has ${SensitivePermissions.shortName(change.permission)}"
+    is InventoryChange.AppRemoved -> "Removed or hidden: $name"
 }
