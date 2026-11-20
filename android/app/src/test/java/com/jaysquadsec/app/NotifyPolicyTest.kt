@@ -49,4 +49,31 @@ class NotifyPolicyTest {
         assertTrue(NotifyPolicy.decode("garbage\nx").isEmpty())
         assertTrue(NotifyPolicy.decode("").isEmpty())
     }
+
+    @Test
+    fun aChangeIsOnlyRecordedAsAnnouncedIfThePostSucceeded() {
+        val d = NotifyPolicy.decide(listOf(granted), emptySet())
+        val notPosted = NotifyPolicy.ledgerAfter(d, emptySet(), posted = false)
+        assertEquals(1, NotifyPolicy.decide(listOf(granted), notPosted).toNotify.size)
+        val posted = NotifyPolicy.ledgerAfter(d, emptySet(), posted = true)
+        assertTrue(NotifyPolicy.decide(listOf(granted), posted).toNotify.isEmpty())
+    }
+
+    @Test
+    fun aNewPostStillShowsEarlierUnhandledAlertsMostSevereFirst() {
+        val l1 = NotifyPolicy.ledgerAfter(NotifyPolicy.decide(listOf(signer), emptySet()), emptySet(), true)
+        val newApp = InventoryChange.AppAdded("com.c.app", emptySet())
+        val d = NotifyPolicy.decide(listOf(newApp, signer), l1)
+        assertEquals(listOf<InventoryChange>(newApp), d.toNotify)
+        assertEquals(listOf(signer, newApp), d.unreviewed)
+    }
+
+    @Test
+    fun keysHaveFixedLengthSoLongNamesCannotCauseRepeatAlerts() {
+        val long = InventoryChange.SignerChanged("com." + "a".repeat(250), "x", List(6) { "b".repeat(64) }.joinToString(","))
+        assertEquals(64, long.key().length)
+        val l = NotifyPolicy.ledgerAfter(NotifyPolicy.decide(listOf(long), emptySet()), emptySet(), true)
+        val reread = NotifyPolicy.decode(NotifyPolicy.encode(l))
+        assertTrue(NotifyPolicy.decide(listOf(long), reread).toNotify.isEmpty())
+    }
 }

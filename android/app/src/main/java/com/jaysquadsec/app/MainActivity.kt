@@ -38,7 +38,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -52,6 +56,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // A force stop cancels scheduled jobs; re-arm on every visit (idempotent).
+        ChangeCheckJob.schedule(applicationContext)
         resumeTick.intValue++
     }
 
@@ -71,6 +77,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Accept is a trust decision: ignore touches while another app's
+        // window covers ours (tapjacking), and hide such overlays on 12+.
+        window.decorView.filterTouchesWhenObscured = true
+        if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
+        ChangeCheck.cleanStaleTemps(applicationContext.filesDir)
         val inventory = PackageInventoryReader(applicationContext)
         val baselineStore = BaselineStore(applicationContext.filesDir)
         ChangeCheckJob.schedule(applicationContext)
@@ -88,16 +99,21 @@ class MainActivity : ComponentActivity() {
                     var changes by remember { mutableStateOf<List<InventoryChange>>(emptyList()) }
                     var baselineNote by remember { mutableStateOf<String?>(null) }
                     var baselineApps by remember { mutableStateOf<Map<String, AppFingerprint>>(emptyMap()) }
+                    // Fingerprints of the scan that produced `changes`: assigned together
+                    // with it, and read at action time (not captured), so Accept always
+                    // saves exactly what was displayed.
+                    var currentFp by remember { mutableStateOf<Map<String, AppFingerprint>>(emptyMap()) }
                     val labels = remember(apps) { apps.associate { it.packageName to it.label } }
-                    val currentFp = remember(apps) { apps.map { AppFingerprint.of(it) }.associateBy { it.packageName } }
                     val scope = rememberCoroutineScope()
+                    // One refresh or accept at a time; a new refresh cancels the old one.
+                    val uiMutex = remember { Mutex() }
+                    val refreshJob = remember { arrayOfNulls<Job>(1) }
 
                     suspend fun refresh() {
                         loading = true
                         error = null
                         try {
                             val scanned = withContext(Dispatchers.IO) { inventory.readLaunchableApps() }
-                            apps = scanned
                             val current = scanned.map { AppFingerprint.of(it) }
                             var base: Map<String, AppFingerprint> = current.associateBy { it.packageName }
                             val (found, note) = withContext(Dispatchers.IO) {
@@ -125,9 +141,14 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+                            // Publish one consistent snapshot.
+                            apps = scanned
+                            currentFp = current.associateBy { it.packageName }
                             changes = found
                             baselineNote = note
                             baselineApps = base
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
                         } catch (failure: Exception) {
                             error = failure.message ?: "Inventory scan failed"
                         } finally {
@@ -138,7 +159,24 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(Unit) {
                         engine = withContext(Dispatchers.Default) { EngineSelfTest.run() }
                     }
-                    LaunchedEffect(resumeTick.intValue) { refresh() }
+                    fun requestRefresh() {
+                        refreshJob[0]?.cancel()
+                        refreshJob[0] = scope.launch { uiMutex.withLock { refresh() } }
+                    }
+
+                    fun accept(packages: Set<String>, note: String?) {
+                        scope.launch {
+                            uiMutex.withLock {
+                                val updated = InventoryDiff.acceptPackages(baselineApps, currentFp, packages)
+                                withContext(Dispatchers.IO) { baselineStore.save(updated.values) }
+                                baselineApps = updated
+                                changes = InventoryDiff.compare(updated, currentFp)
+                                if (note != null) baselineNote = note
+                            }
+                        }
+                    }
+
+                    LaunchedEffect(resumeTick.intValue) { requestRefresh() }
 
                     Column(
                         modifier = Modifier.fillMaxSize().padding(20.dp),
@@ -153,9 +191,10 @@ class MainActivity : ComponentActivity() {
                             Column(Modifier.padding(16.dp)) {
                                 Text("Protection status", style = MaterialTheme.typography.titleMedium)
                                 Spacer(Modifier.height(6.dp))
-                                Text("Inventory-only preview")
+                                Text("Alert-only: watches for app changes")
                                 Text(
-                                    "No background monitoring or network blocking is active.",
+                                    "Nothing is blocked and nothing leaves the phone. " +
+                                        "No network monitoring yet.",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                                 Spacer(Modifier.height(8.dp))
@@ -174,6 +213,14 @@ class MainActivity : ComponentActivity() {
                                         } ?: "not yet"),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
+                                if (last != null && System.currentTimeMillis() - last > 3L * 60 * 60 * 1000) {
+                                    Text(
+                                        "The background check has not run for over 3 hours. Android may be " +
+                                            "stopping it: set Battery to No restriction in this app's settings.",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
                                 if (!notifyOk) {
                                     Text(
                                         "Notifications are off, so changes only show here. " +
@@ -216,7 +263,7 @@ class MainActivity : ComponentActivity() {
                             Text("Visible launchable apps: ${apps.size}")
                             Button(
                                 enabled = !loading,
-                                onClick = { scope.launch { refresh() } },
+                                onClick = { requestRefresh() },
                             ) { Text("Refresh") }
                         }
                         Text(
@@ -235,11 +282,10 @@ class MainActivity : ComponentActivity() {
                                     }
                                     val byPackage = changes.groupBy { it.packageName }
                                     byPackage.entries.take(6).forEach { (pkg, pkgChanges) ->
-                                        val name = labels[pkg] ?: pkg
                                         Spacer(Modifier.height(8.dp))
                                         pkgChanges.forEach { change ->
                                             Text(
-                                                describe(change, name),
+                                                describe(change, labels[pkg]),
                                                 color = if (change.severity >= 3) {
                                                     MaterialTheme.colorScheme.error
                                                 } else {
@@ -249,14 +295,7 @@ class MainActivity : ComponentActivity() {
                                             )
                                         }
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            Button(onClick = {
-                                                scope.launch {
-                                                    val updated = InventoryDiff.acceptPackage(baselineApps, currentFp, pkg)
-                                                    withContext(Dispatchers.IO) { baselineStore.save(updated.values) }
-                                                    baselineApps = updated
-                                                    changes = InventoryDiff.compare(updated, currentFp)
-                                                }
-                                            }) { Text("Accept") }
+                                            Button(onClick = { accept(setOf(pkg), null) }) { Text("Accept") }
                                             if (pkg in currentFp) {
                                                 OutlinedButton(onClick = { openAppSettings(pkg) }) {
                                                     Text("Reject: open settings")
@@ -275,14 +314,11 @@ class MainActivity : ComponentActivity() {
                                                 "Android does not let one app change another app's permissions.",
                                             style = MaterialTheme.typography.bodySmall,
                                         )
+                                        // Only what is on screen: never accept changes the user has not seen.
+                                        val shown = byPackage.keys.take(6).toSet()
                                         OutlinedButton(onClick = {
-                                            scope.launch {
-                                                withContext(Dispatchers.IO) { baselineStore.save(currentFp.values) }
-                                                baselineApps = currentFp
-                                                changes = emptyList()
-                                                baselineNote = "All changes accepted as the new baseline (${currentFp.size} apps)."
-                                            }
-                                        }) { Text("Accept all") }
+                                            accept(shown, "Accepted changes for ${shown.size} apps.")
+                                        }) { Text(if (byPackage.size > 6) "Accept these ${shown.size}" else "Accept all") }
                                     }
                                 }
                             }
@@ -300,7 +336,7 @@ class MainActivity : ComponentActivity() {
                                 items(apps, key = { it.packageName }) { app ->
                                     Card(modifier = Modifier.fillMaxWidth()) {
                                         Column(Modifier.padding(12.dp)) {
-                                            Text(app.label, style = MaterialTheme.typography.titleSmall)
+                                            Text(safeLabel(app.label, 60), style = MaterialTheme.typography.titleSmall)
                                             Text(app.packageName, style = MaterialTheme.typography.bodySmall)
                                             Text(
                                                 "Signer SHA-256: ${app.signerSha256 ?: "unavailable"}",
@@ -311,7 +347,7 @@ class MainActivity : ComponentActivity() {
                                                 Text("Requested permissions", style = MaterialTheme.typography.labelMedium)
                                                 app.permissions.take(5).forEach { permission ->
                                                     Text(
-                                                        "${if (permission.granted) "Granted" else "Not granted"}: ${permission.name}",
+                                                        "${if (permission.granted) "Granted" else "Not granted"}: ${safeLabel(permission.name, 80)}",
                                                         style = MaterialTheme.typography.bodySmall,
                                                     )
                                                 }

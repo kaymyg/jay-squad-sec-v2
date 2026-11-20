@@ -5,6 +5,9 @@
     <!-- Normal permission, granted at install: keeps the hourly check after a reboot. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Normal permission: lets the app hide other apps' overlays on Android 12+. -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+
     <!-- Launcher visibility only. No QUERY_ALL_PACKAGES or privileged access. -->
     <queries>
         <intent>

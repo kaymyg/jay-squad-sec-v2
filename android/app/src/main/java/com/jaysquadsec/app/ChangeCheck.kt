@@ -32,6 +32,7 @@ object ChangeCheck {
     fun run(context: Context) {
         synchronized(lock) {
             val dir = context.filesDir
+            cleanStaleTemps(dir)
             val store = BaselineStore(dir)
             val apps = PackageInventoryReader(context).readLaunchableApps()
             val current = apps.map { AppFingerprint.of(it) }
@@ -58,12 +59,14 @@ object ChangeCheck {
                         }
                     }.getOrDefault(emptySet())
                     val decision = NotifyPolicy.decide(changes, ledger)
+                    var posted = false
                     if (decision.toNotify.isNotEmpty()) {
-                        val lines = decision.toNotify.map { describe(it, labels[it.packageName] ?: it.packageName) }
-                        val title = if (lines.size == 1) "Security change found" else "${lines.size} security changes found"
-                        Notifier.show(context, title, lines.first(), lines)
+                        // Show every unreviewed change, not only the new ones,
+                        // so this post never hides an earlier unhandled alert.
+                        val lines = decision.unreviewed.map { describe(it, labels[it.packageName]) }
+                        posted = Notifier.show(context, notificationTitle(decision.unreviewed), lines.first(), lines)
                     }
-                    atomicWrite(dir, LEDGER_FILE, NotifyPolicy.encode(decision.ledger))
+                    atomicWrite(dir, LEDGER_FILE, NotifyPolicy.encode(NotifyPolicy.ledgerAfter(decision, ledger, posted)))
                 }
             }
             atomicWrite(dir, LAST_RUN_FILE, System.currentTimeMillis().toString())
@@ -78,10 +81,17 @@ object ChangeCheck {
         val tmp = File.createTempFile("$name.", ".tmp", dir)
         try {
             FileOutputStream(tmp).use { it.write(text.toByteArray(Charsets.UTF_8)); it.fd.sync() }
-            tmp.renameTo(File(dir, name))
+            if (!tmp.renameTo(File(dir, name))) throw java.io.IOException("could not save $name")
         } finally {
             if (tmp.exists()) tmp.delete()
         }
+    }
+
+    /** Remove temp files left by a process that died mid-write (older than a minute). */
+    fun cleanStaleTemps(dir: File) = synchronized(BaselineStore.WRITE_LOCK) {
+        val cutoff = System.currentTimeMillis() - 60_000
+        dir.listFiles()?.filter { it.isFile && it.name.endsWith(".tmp") && it.lastModified() < cutoff }
+            ?.forEach { it.delete() }
     }
 }
 
@@ -112,7 +122,7 @@ class ChangeCheckJob : JobService() {
         /** Idempotent: keeps an existing schedule. Persisted across reboots. */
         fun schedule(context: Context) {
             val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
-            if (scheduler.allPendingJobs.any { it.id == JOB_ID }) return
+            if (scheduler.getPendingJob(JOB_ID) != null) return
             val job = JobInfo.Builder(JOB_ID, ComponentName(context, ChangeCheckJob::class.java))
                 .setPeriodic(PERIOD_MS, FLEX_MS)
                 .setPersisted(true)
@@ -126,13 +136,23 @@ object Notifier {
     private const val CHANNEL = "security-changes"
     private const val ID = 1
 
-    fun canNotify(context: Context): Boolean =
-        Build.VERSION.SDK_INT < 33 ||
-            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    /** Permission granted, notifications enabled for the app, and our channel not blocked. */
+    fun canNotify(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return false
+        if (!nm.areNotificationsEnabled()) return false
+        val channel = nm.getNotificationChannel(CHANNEL)
+        return channel == null || channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
 
-    fun show(context: Context, title: String, text: String, lines: List<String>) {
-        if (!canNotify(context)) return
-        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+    /** Returns true only if the notification was actually posted. */
+    fun show(context: Context, title: String, text: String, lines: List<String>): Boolean {
+        if (!canNotify(context)) return false
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return false
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "Security changes", NotificationManager.IMPORTANCE_DEFAULT).apply {
                 description = "New apps, changed signing certificates and new sensitive access"
@@ -166,6 +186,6 @@ object Notifier {
             .setContentIntent(open)
             .setAutoCancel(true)
             .build()
-        runCatching { nm.notify(ID, n) }
+        return runCatching { nm.notify(ID, n) }.isSuccess
     }
 }
