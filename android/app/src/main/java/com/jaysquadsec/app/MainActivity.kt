@@ -74,7 +74,11 @@ class MainActivity : ComponentActivity() {
                                         InventoryDiff.compare(
                                             stored.apps,
                                             current.associateBy { it.packageName },
-                                        ) to null
+                                        ) to "Compared with baseline of ${stored.apps.size} apps recorded " +
+                                            java.text.DateFormat.getDateTimeInstance(
+                                                java.text.DateFormat.MEDIUM,
+                                                java.text.DateFormat.SHORT,
+                                            ).format(java.util.Date(stored.recordedAtMs)) + "." 
                                     }
                                 }
                             }
@@ -145,7 +149,7 @@ class MainActivity : ComponentActivity() {
                                     Text("Changes since baseline", style = MaterialTheme.typography.titleMedium)
                                     Spacer(Modifier.height(6.dp))
                                     baselineNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                                    if (baselineNote == null && changes.isEmpty()) {
+                                    if (changes.isEmpty() && baselineNote?.startsWith("Compared") != false) {
                                         Text("No changes.", style = MaterialTheme.typography.bodySmall)
                                     }
                                     changes.take(8).forEach { change ->
@@ -169,7 +173,7 @@ class MainActivity : ComponentActivity() {
                                                     baselineStore.save(apps.map { AppFingerprint.of(it) })
                                                 }
                                                 changes = emptyList()
-                                                baselineNote = "Changes accepted as the new baseline."
+                                                baselineNote = "Changes accepted as the new baseline (${apps.size} apps)."
                                             }
                                         }) { Text("Accept as new baseline") }
                                     }
