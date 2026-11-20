@@ -123,6 +123,22 @@ object InventoryDiff {
         )
     }
 
+    /**
+     * Accept every change for one package only: its baseline entry becomes
+     * what is observed now (or is dropped if the app is gone). All other
+     * packages keep their old baseline, so their changes stay flagged.
+     */
+    fun acceptPackage(
+        baseline: Map<String, AppFingerprint>,
+        current: Map<String, AppFingerprint>,
+        packageName: String,
+    ): Map<String, AppFingerprint> {
+        val out = LinkedHashMap(baseline)
+        val now = current[packageName]
+        if (now == null) out.remove(packageName) else out[packageName] = now
+        return out
+    }
+
     private fun detail(c: InventoryChange): String = when (c) {
         is InventoryChange.PermissionGranted -> c.permission
         is InventoryChange.PermissionRevoked -> c.permission
