@@ -66,7 +66,7 @@ class PackageInventoryReader(context: Context) {
             PermissionObservation(
                 name = name,
                 granted = flags.getOrNull(index)
-                    ?.and(PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0,
+                    ?.and(PackageInfo.REQUESTED_PERMISSION_GRANTED) == PackageInfo.REQUESTED_PERMISSION_GRANTED,
             )
         }
 
