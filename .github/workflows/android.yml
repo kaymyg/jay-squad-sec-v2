@@ -6,12 +6,20 @@ on:
       - "stage-2/**"
     paths:
       - "android/**"
-      - "bridge/jvm/**"
+      - "bridge/**"
+      - "core/**"
+      - "protocol/**"
+      - "update/**"
+      - "apply/**"
       - ".github/workflows/android.yml"
   pull_request:
     paths:
       - "android/**"
-      - "bridge/jvm/**"
+      - "bridge/**"
+      - "core/**"
+      - "protocol/**"
+      - "update/**"
+      - "apply/**"
       - ".github/workflows/android.yml"
 
 jobs:
@@ -28,7 +36,15 @@ jobs:
           # The action's default list includes the long-removed "tools"
           # package, which fails on current runner images. Install exactly
           # what compileSdk 35 needs.
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018"
+      - name: Install Rust (MSRV) with Android targets
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.75.0
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Build native engine for Android
+        # No builder key here: signed updates stay fail-closed in CI builds.
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" bash android/build-native.sh
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
@@ -36,6 +52,20 @@ jobs:
         run: gradle -p android testDebugUnitTest
       - name: Build debug APK
         run: gradle -p android assembleDebug
+      - name: Verify the APK carries the engine for every ABI, 16 KB aligned
+        run: |
+          set -euo pipefail
+          apk=$(ls android/app/build/outputs/apk/debug/*.apk)
+          readelf="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            unzip -l "$apk" | grep -q "lib/$abi/libjay_squad_sec_bridge.so" || { echo "missing $abi"; exit 1; }
+            so=android/app/src/main/jniLibs/$abi/libjay_squad_sec_bridge.so
+            "$readelf" -lW "$so" | awk '$1=="LOAD"{print $NF}' | sort -u | grep -qx 0x4000 \
+              || { echo "$abi not 16 KB aligned"; "$readelf" -lW "$so" | grep LOAD; exit 1; }
+            "$readelf" -sW --dyn-syms "$so" | grep -q Java_com_jaysquadsec_bridge_NativeBridge_nativeNew \
+              || { echo "$abi missing JNI symbols"; exit 1; }
+            echo "$abi ok: $(stat -c %s "$so") bytes"
+          done
       - name: Upload debug APK
         # Debug-signed, for installing on a test phone only; not a release.
         uses: actions/upload-artifact@v4

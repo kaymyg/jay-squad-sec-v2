@@ -5,3 +5,7 @@ target/
 # integrity). Do not re-add Cargo.lock to this ignore list.
 jaysec_alerts.log
 *.log
+# Built by android/build-native.sh
+android/app/src/main/jniLibs/
+android/app/build/
+android/.gradle/
