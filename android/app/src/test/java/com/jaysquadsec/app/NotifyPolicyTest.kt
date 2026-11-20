@@ -33,6 +33,14 @@ class NotifyPolicyTest {
     }
 
     @Test
+    fun onlySensitiveAccessOrSwappedAppsInterrupt() {
+        val plainNewApp = InventoryChange.AppAdded("com.c.app", emptySet())
+        val riskyNewApp = InventoryChange.AppAdded("com.d.app", setOf(sms))
+        val d = NotifyPolicy.decide(listOf(plainNewApp, riskyNewApp, granted, signer), emptySet())
+        assertEquals(setOf<InventoryChange>(riskyNewApp, granted, signer), d.toNotify.toSet())
+    }
+
+    @Test
     fun revocationsAndRemovalsAreNotNotified() {
         val d = NotifyPolicy.decide(
             listOf(InventoryChange.PermissionRevoked("com.a.app", sms), InventoryChange.AppRemoved("com.c.app")),
@@ -62,7 +70,7 @@ class NotifyPolicyTest {
     @Test
     fun aNewPostStillShowsEarlierUnhandledAlertsMostSevereFirst() {
         val l1 = NotifyPolicy.ledgerAfter(NotifyPolicy.decide(listOf(signer), emptySet()), emptySet(), true)
-        val newApp = InventoryChange.AppAdded("com.c.app", emptySet())
+        val newApp = InventoryChange.AppAdded("com.c.app", setOf(sms))
         val d = NotifyPolicy.decide(listOf(newApp, signer), l1)
         assertEquals(listOf<InventoryChange>(newApp), d.toNotify)
         assertEquals(listOf(signer, newApp), d.unreviewed)

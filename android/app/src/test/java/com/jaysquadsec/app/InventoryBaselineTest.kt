@@ -160,9 +160,9 @@ class InventoryBaselineTest {
     }
 
     @Test
-    fun notificationTitleDoesNotOverstateAPlainNewApp() {
-        assertEquals("New app installed", notificationTitle(listOf(InventoryChange.AppAdded("com.a.app", emptySet()))))
-        assertEquals("Security alert", notificationTitle(listOf(InventoryChange.AppAdded("com.a.app", setOf(sms)))))
+    fun notificationTitles() {
         assertEquals("Security alert", notificationTitle(listOf(InventoryChange.PermissionGranted("com.a.app", sms))))
+        val two = listOf(InventoryChange.PermissionGranted("com.a.app", sms), InventoryChange.AppAdded("com.b.app", setOf(mic)))
+        assertEquals("2 security alerts to review", notificationTitle(two))
     }
 }

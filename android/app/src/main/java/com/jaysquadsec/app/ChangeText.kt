@@ -47,11 +47,6 @@ internal fun describe(change: InventoryChange, label: String?): String {
     }
 }
 
-/** Notification title that does not overstate a plain new app. */
-internal fun notificationTitle(changes: List<InventoryChange>): String = when {
-    changes.size > 1 -> "${changes.size} unreviewed security changes"
-    changes.single() is InventoryChange.SignerChanged ||
-        changes.single() is InventoryChange.PermissionGranted ||
-        (changes.single() as? InventoryChange.AppAdded)?.sensitive?.isNotEmpty() == true -> "Security alert"
-    else -> "New app installed"
-}
+/** Notifications only ever carry sensitive-access or swapped-app alerts. */
+internal fun notificationTitle(changes: List<InventoryChange>): String =
+    if (changes.size == 1) "Security alert" else "${changes.size} security alerts to review"
