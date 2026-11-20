@@ -305,6 +305,69 @@ pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeApp
     }
 }
 
+/// `static native int nativeSubmitAppEvent(long handle, byte[] packageIdentity,
+///     byte[] kind, byte[] detail)`.
+///
+/// # Safety
+/// Called only by the JVM: `env` must be the current thread's valid JNIEnv and
+/// every array argument a valid local reference or null.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeSubmitAppEvent(
+    env: Env,
+    _cls: JClass,
+    handle: JLong,
+    package_identity: JByteArray,
+    kind: JByteArray,
+    detail: JByteArray,
+) -> JInt {
+    let result = guarded(|| {
+        // SAFETY: env and array refs come straight from the JVM for this call.
+        let (identity, kind, detail) = unsafe {
+            (
+                read_byte_array(env, package_identity, MAX_IDENTITY_LEN)?,
+                read_byte_array(env, kind, MAX_KIND_LEN)?,
+                read_byte_array(env, detail, MAX_DETAIL_LEN)?,
+            )
+        };
+        Ok(crate::submit_app_event(
+            handle_from(handle),
+            &identity,
+            &kind,
+            &detail,
+        ))
+    });
+    match result {
+        Ok(code) => code,
+        Err(e) => e,
+    }
+}
+
+/// `static native long nativeAppAssessment(long handle, byte[] packageIdentity)`.
+/// Returns `(action << 32) | score_thousandths` (non-negative), or the
+/// negative bridge error code.
+///
+/// # Safety
+/// Called only by the JVM: `env` must be the current thread's valid JNIEnv and
+/// the array argument a valid local reference or null.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeAppAssessment(
+    env: Env,
+    _cls: JClass,
+    handle: JLong,
+    package_identity: JByteArray,
+) -> JLong {
+    let result = guarded(|| {
+        // SAFETY: env and array ref come straight from the JVM for this call.
+        let identity = unsafe { read_byte_array(env, package_identity, MAX_IDENTITY_LEN)? };
+        crate::app_assessment(handle_from(handle), &identity)
+    });
+    match result {
+        // action <= 4 fits in bits 32..63 without reaching the sign bit.
+        Ok((action, score)) => ((action as JLong) << 32) | crate::score_milli(score) as JLong,
+        Err(code) => -(code as JLong),
+    }
+}
+
 /// `static native int nativeAbiVersion()`.
 #[no_mangle]
 pub extern "system" fn Java_com_jaysquadsec_bridge_NativeBridge_nativeAbiVersion(

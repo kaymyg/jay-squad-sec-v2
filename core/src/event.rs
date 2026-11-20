@@ -24,6 +24,10 @@ pub enum EventKind {
     StableTick,            // periodic "nothing suspicious happened"
     TempExecution,         // executable running from temp/download dirs
     DeletedExecutable,     // process whose on-disk binary was deleted (anti-forensics)
+    // Android app-level observations (no process involved):
+    AppSignerChanged,           // same package, different signing certificate
+    SensitivePermissionGranted, // an app newly holds SMS, microphone, location...
+    NewAppWithSensitiveAccess,  // a newly seen app that already holds such access
 }
 
 impl EventKind {
@@ -31,10 +35,11 @@ impl EventKind {
     pub fn severity(self) -> u8 {
         use EventKind::*;
         match self {
-            CredentialAccess | RemoteThreadInjection => 3,
+            CredentialAccess | RemoteThreadInjection | AppSignerChanged => 3,
             RwxAlloc | PrivilegeEscalation | UnsignedModuleLoad | PersistenceWrite
-            | DeletedExecutable => 2,
-            UnsignedBinary | ProcessStart | ProcessExit | TempExecution => 1,
+            | DeletedExecutable | SensitivePermissionGranted => 2,
+            UnsignedBinary | ProcessStart | ProcessExit | TempExecution
+            | NewAppWithSensitiveAccess => 1,
             NetworkConnect | FileWrite | SignedBinary | StableTick => 0,
         }
     }

@@ -25,7 +25,7 @@ public final class NativeBridge {
     public static final int ERR_UPDATE_REJECTED = 11;
 
     /** ABI version this Java/Kotlin code was written against. */
-    public static final int EXPECTED_ABI = 4;
+    public static final int EXPECTED_ABI = 5;
 
     /** Returns a handle, or 0 if the engine limit is reached. */
     public static native long nativeNew(long bootNonce);
@@ -45,6 +45,12 @@ public final class NativeBridge {
 
     /** Verify, install and activate a signed data-only patch. Returns version, or a negative error code. */
     public static native long nativeApplyRules(long handle, byte[] storageDir, byte[] signedPatch);
+
+    /** App-level observation (no process): app_signer_changed, sensitive_permission_granted, new_app_with_sensitive_access. */
+    public static native int nativeSubmitAppEvent(long handle, byte[] packageIdentity, byte[] kind, byte[] detail);
+
+    /** (action << 32) | score in thousandths, or a negative error code. Action: 0 Allow .. 4 Block. */
+    public static native long nativeAppAssessment(long handle, byte[] packageIdentity);
 
     public static native int nativeAbiVersion();
 }
