@@ -1,9 +1,14 @@
 name: Android foundation
 
 on:
+  # Feature branches are built through their pull request only: building the
+  # same commit for both push and pull_request doubled the runs, and the push
+  # runs kept restoring a Gradle cache that had recorded a transient
+  # "artifact not found" from Maven Central.
   push:
     branches:
-      - "stage-2/**"
+      - develop
+      - main
     paths:
       - "android/**"
       - "bridge/**"
@@ -21,6 +26,10 @@ on:
       - "update/**"
       - "apply/**"
       - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   android:
@@ -48,6 +57,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+          # The restored cache kept a recorded 'artifact not found' from a
+          # transient Maven Central failure, failing builds for real artifacts.
+          # Fresh dependency resolution costs about a minute and is reliable.
+          cache-disabled: true
       - name: Run Android unit tests
         run: gradle -p android testDebugUnitTest
       - name: Build debug APK
@@ -74,3 +87,43 @@ jobs:
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
+
+  # Installs the APK on a fresh Android 14 emulator, as a new user would,
+  # and checks launch, the notification prompt, the warning, the native
+  # engine and a background check. Catches Android-only failures that JVM
+  # unit tests cannot.
+  device-smoke:
+    needs: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: jay-squad-sec-debug-apk
+          path: apk
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Smoke test on Android 14
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash android/device-smoke.sh apk/app-debug.apk
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-smoke-evidence
+          path: smoke-out/
+          retention-days: 7
