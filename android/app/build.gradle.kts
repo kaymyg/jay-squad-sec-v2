@@ -16,6 +16,18 @@ android {
         versionName = "0.1.0"
     }
 
+    // Shared DEBUG key so test builds from any CI run install over each other.
+    // Debug keys are public by convention and cannot sign a release; the
+    // release key is never stored in this repository.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
