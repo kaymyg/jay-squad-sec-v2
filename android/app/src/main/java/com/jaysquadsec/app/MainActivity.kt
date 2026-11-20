@@ -192,189 +192,199 @@ class MainActivity : ComponentActivity() {
 
                     LaunchedEffect(resumeTick.intValue) { requestRefresh() }
 
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(20.dp),
+                    // One scrolling list for the whole screen: the cards above can be
+                    // tall on a small phone, and a fixed column with a weighted inner
+                    // list cannot fit them.
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(20.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text("Jay Squad Sec", style = MaterialTheme.typography.headlineMedium)
-                        Text(
-                            "Local Android security foundation",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(16.dp)) {
-                                Text("Protection status", style = MaterialTheme.typography.titleMedium)
-                                Spacer(Modifier.height(6.dp))
-                                Text("Alert-only: watches for app changes")
-                                Text(
-                                    "Nothing is blocked and nothing leaves the phone. " +
-                                        "No network monitoring yet.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                Spacer(Modifier.height(8.dp))
-                                Text("Background checks", style = MaterialTheme.typography.titleSmall)
-                                val tick = resumeTick.intValue
-                                val last = remember(tick) { ChangeCheck.lastRunMs(applicationContext) }
-                                val lastError = remember(tick) { ChangeCheck.lastError(applicationContext) }
-                                val notifyOk = remember(tick) { Notifier.canNotify(applicationContext) }
-                                val restricted = remember(tick) { backgroundRestricted() }
-                                Text(
-                                    "About every hour, alerts by notification. Last check: " +
-                                        (last?.let {
-                                            java.text.DateFormat.getDateTimeInstance(
-                                                java.text.DateFormat.MEDIUM,
-                                                java.text.DateFormat.SHORT,
-                                            ).format(java.util.Date(it))
-                                        } ?: "not yet"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                if (lastError != null) {
-                                    Text(
-                                        "The last background check failed ($lastError). It will retry.",
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                } else if (last != null && System.currentTimeMillis() - last > 3L * 60 * 60 * 1000) {
-                                    Text(
-                                        "The background check has not run for over 3 hours. Android may be " +
-                                            "stopping it: set Battery to No restriction in this app's settings.",
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                                if (!notifyOk) {
-                                    Text(
-                                        "Notifications are off, so changes only show here. " +
-                                            "Turn them on in this app's settings.",
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                                if (restricted) {
-                                    Text(
-                                        "Android is restricting this app in the background, so checks may not run. " +
-                                            "In this app's settings, set Battery to No restriction.",
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                                if (!notifyOk || restricted) {
-                                    OutlinedButton(onClick = { openAppSettings(packageName) }) {
-                                        Text("Open this app's settings")
-                                    }
-                                }
-                                Spacer(Modifier.height(8.dp))
-                                Text("Security engine", style = MaterialTheme.typography.titleSmall)
-                                val result = engine
-                                Text(
-                                    result?.summary ?: "Checking native engine...",
-                                    color = if (result != null && !result.ok) {
-                                        MaterialTheme.colorScheme.error
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
+                        item {
+                            Text("Jay Squad Sec", style = MaterialTheme.typography.headlineMedium)
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text("Visible launchable apps: ${apps.size}")
-                            Button(
-                                enabled = !loading,
-                                onClick = { requestRefresh() },
-                            ) { Text("Refresh") }
+                        item {
+                            Text(
+                                "Local Android security foundation",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
                         }
-                        Text(
-                            "Android limits which installed packages ordinary apps can see. " +
-                                "This list is not a complete device inventory.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        if (!loading && error == null) {
+                        item {
                             Card(modifier = Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(16.dp)) {
-                                    Text("Changes since baseline", style = MaterialTheme.typography.titleMedium)
+                                    Text("Protection status", style = MaterialTheme.typography.titleMedium)
                                     Spacer(Modifier.height(6.dp))
-                                    baselineNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                                    if (changes.isEmpty() && baselineNote?.startsWith("Compared") != false) {
-                                        Text("No changes.", style = MaterialTheme.typography.bodySmall)
+                                    Text("Alert-only: watches for app changes")
+                                    Text(
+                                        "Nothing is blocked and nothing leaves the phone. " +
+                                            "No network monitoring yet.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Background checks", style = MaterialTheme.typography.titleSmall)
+                                    val tick = resumeTick.intValue
+                                    val last = remember(tick) { ChangeCheck.lastRunMs(applicationContext) }
+                                    val lastError = remember(tick) { ChangeCheck.lastError(applicationContext) }
+                                    val notifyOk = remember(tick) { Notifier.canNotify(applicationContext) }
+                                    val restricted = remember(tick) { backgroundRestricted() }
+                                    Text(
+                                        "About every hour, alerts by notification. Last check: " +
+                                            (last?.let {
+                                                java.text.DateFormat.getDateTimeInstance(
+                                                    java.text.DateFormat.MEDIUM,
+                                                    java.text.DateFormat.SHORT,
+                                                ).format(java.util.Date(it))
+                                            } ?: "not yet"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    if (lastError != null) {
+                                        Text(
+                                            "The last background check failed ($lastError). It will retry.",
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    } else if (last != null && System.currentTimeMillis() - last > 3L * 60 * 60 * 1000) {
+                                        Text(
+                                            "The background check has not run for over 3 hours. Android may be " +
+                                                "stopping it: set Battery to No restriction in this app's settings.",
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
                                     }
-                                    val byPackage = changes.groupBy { it.packageName }
-                                    byPackage.entries.take(6).forEach { (pkg, pkgChanges) ->
-                                        Spacer(Modifier.height(8.dp))
-                                        pkgChanges.forEach { change ->
-                                            Text(
-                                                describe(change, labels[pkg]),
-                                                color = if (change.severity >= 3) {
-                                                    MaterialTheme.colorScheme.error
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurface
-                                                },
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
+                                    if (!notifyOk) {
+                                        Text(
+                                            "Notifications are off, so changes only show here. " +
+                                                "Turn them on in this app's settings.",
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                    if (restricted) {
+                                        Text(
+                                            "Android is restricting this app in the background, so checks may not run. " +
+                                                "In this app's settings, set Battery to No restriction.",
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                    if (!notifyOk || restricted) {
+                                        OutlinedButton(onClick = { openAppSettings(packageName) }) {
+                                            Text("Open this app's settings")
                                         }
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            Button(onClick = { accept(setOf(pkg), null) }) { Text("Accept") }
-                                            if (pkg in currentFp) {
-                                                OutlinedButton(onClick = { openAppSettings(pkg) }) {
-                                                    Text("Reject: open settings")
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Security engine", style = MaterialTheme.typography.titleSmall)
+                                    val result = engine
+                                    Text(
+                                        result?.summary ?: "Checking native engine...",
+                                        color = if (result != null && !result.ok) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("Visible launchable apps: ${apps.size}")
+                                Button(
+                                    enabled = !loading,
+                                    onClick = { requestRefresh() },
+                                ) { Text("Refresh") }
+                            }
+                        }
+                        item {
+                            Text(
+                                "Android limits which installed packages ordinary apps can see. " +
+                                    "This list is not a complete device inventory.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        item {
+                            if (!loading && error == null) {
+                                Card(modifier = Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(16.dp)) {
+                                        Text("Changes since baseline", style = MaterialTheme.typography.titleMedium)
+                                        Spacer(Modifier.height(6.dp))
+                                        baselineNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                                        if (changes.isEmpty() && baselineNote?.startsWith("Compared") != false) {
+                                            Text("No changes.", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                        val byPackage = changes.groupBy { it.packageName }
+                                        byPackage.entries.take(6).forEach { (pkg, pkgChanges) ->
+                                            Spacer(Modifier.height(8.dp))
+                                            pkgChanges.forEach { change ->
+                                                Text(
+                                                    describe(change, labels[pkg]),
+                                                    color = if (change.severity >= 3) {
+                                                        MaterialTheme.colorScheme.error
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurface
+                                                    },
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                )
+                                            }
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Button(onClick = { accept(setOf(pkg), null) }) { Text("Accept") }
+                                                if (pkg in currentFp) {
+                                                    OutlinedButton(onClick = { openAppSettings(pkg) }) {
+                                                        Text("Reject: open settings")
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                    if (byPackage.size > 6) {
-                                        Text("+ ${byPackage.size - 6} more apps with changes", style = MaterialTheme.typography.bodySmall)
-                                    }
-                                    if (changes.isNotEmpty()) {
-                                        Spacer(Modifier.height(6.dp))
-                                        Text(
-                                            "Reject opens the app's settings: switch the permission off or uninstall " +
-                                                "the app there. The warning clears once the change is undone. " +
-                                                "Android does not let one app change another app's permissions.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
-                                        // Only what is on screen: never accept changes the user has not seen.
-                                        val shown = byPackage.keys.take(6).toSet()
-                                        OutlinedButton(onClick = {
-                                            accept(shown, "Accepted changes for ${shown.size} apps.")
-                                        }) { Text(if (byPackage.size > 6) "Accept these ${shown.size}" else "Accept all") }
+                                        if (byPackage.size > 6) {
+                                            Text("+ ${byPackage.size - 6} more apps with changes", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                        if (changes.isNotEmpty()) {
+                                            Spacer(Modifier.height(6.dp))
+                                            Text(
+                                                "Reject opens the app's settings: switch the permission off or uninstall " +
+                                                    "the app there. The warning clears once the change is undone. " +
+                                                    "Android does not let one app change another app's permissions.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                            // Only what is on screen: never accept changes the user has not seen.
+                                            val shown = byPackage.keys.take(6).toSet()
+                                            OutlinedButton(onClick = {
+                                                accept(shown, "Accepted changes for ${shown.size} apps.")
+                                            }) { Text(if (byPackage.size > 6) "Accept these ${shown.size}" else "Accept all") }
+                                        }
                                     }
                                 }
                             }
                         }
                         if (loading) {
-                            CircularProgressIndicator()
+                            item { CircularProgressIndicator() }
                         } else if (error != null) {
-                            Text("Could not read inventory: $error", color = MaterialTheme.colorScheme.error)
+                            item { Text("Could not read inventory: $error", color = MaterialTheme.colorScheme.error) }
                         } else {
-                            LazyColumn(
-                                modifier = Modifier.weight(1f),
-                                contentPadding = PaddingValues(bottom = 16.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                items(apps, key = { it.packageName }) { app ->
-                                    Card(modifier = Modifier.fillMaxWidth()) {
-                                        Column(Modifier.padding(12.dp)) {
-                                            Text(safeLabel(app.label, 60), style = MaterialTheme.typography.titleSmall)
-                                            Text(app.packageName, style = MaterialTheme.typography.bodySmall)
-                                            Text(
-                                                "Signer SHA-256: ${app.signerSha256 ?: "unavailable"}",
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
-                                            if (app.permissions.isNotEmpty()) {
-                                                Spacer(Modifier.height(6.dp))
-                                                Text("Requested permissions", style = MaterialTheme.typography.labelMedium)
-                                                app.permissions.take(5).forEach { permission ->
-                                                    Text(
-                                                        "${if (permission.granted) "Granted" else "Not granted"}: ${safeLabel(permission.name, 80)}",
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                    )
-                                                }
-                                                if (app.permissions.size > 5) {
-                                                    Text("+ ${app.permissions.size - 5} more")
-                                                }
+                            items(apps, key = { it.packageName }) { app ->
+                                Card(modifier = Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(12.dp)) {
+                                        Text(safeLabel(app.label, 60), style = MaterialTheme.typography.titleSmall)
+                                        Text(app.packageName, style = MaterialTheme.typography.bodySmall)
+                                        Text(
+                                            "Signer SHA-256: ${app.signerSha256 ?: "unavailable"}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                        if (app.permissions.isNotEmpty()) {
+                                            Spacer(Modifier.height(6.dp))
+                                            Text("Requested permissions", style = MaterialTheme.typography.labelMedium)
+                                            app.permissions.take(5).forEach { permission ->
+                                                Text(
+                                                    "${if (permission.granted) "Granted" else "Not granted"}: ${safeLabel(permission.name, 80)}",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                )
+                                            }
+                                            if (app.permissions.size > 5) {
+                                                Text("+ ${app.permissions.size - 5} more")
                                             }
                                         }
                                     }
