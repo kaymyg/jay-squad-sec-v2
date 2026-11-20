@@ -133,10 +133,13 @@ class MainActivity : ComponentActivity() {
                                             "so a new one was recorded. Changes before now cannot be shown.")
                                     }
                                     is BaselineStore.Loaded.Ok -> {
-                                        base = stored.apps
+                                        val nowMap = current.associateBy { it.packageName }
+                                        val (absorbed, removedCount) = InventoryDiff.absorbRevocations(stored.apps, nowMap)
+                                        if (removedCount > 0) baselineStore.save(absorbed.values)
+                                        base = absorbed
                                         InventoryDiff.compare(
-                                            stored.apps,
-                                            current.associateBy { it.packageName },
+                                            absorbed,
+                                            nowMap,
                                         ) to "Compared with baseline of ${stored.apps.size} apps recorded " +
                                             java.text.DateFormat.getDateTimeInstance(
                                                 java.text.DateFormat.MEDIUM,

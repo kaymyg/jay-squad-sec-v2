@@ -178,6 +178,31 @@ object InventoryDiff {
         return out
     }
 
+    /**
+     * Losing access is the safe direction and needs no review, so it is
+     * written into the baseline automatically. This also means that if the
+     * access is granted again later, it is detected (and notified) as new.
+     * Returns the updated baseline and how many permission removals were
+     * absorbed (0 means the baseline is unchanged).
+     */
+    fun absorbRevocations(
+        baseline: Map<String, AppFingerprint>,
+        current: Map<String, AppFingerprint>,
+    ): Pair<Map<String, AppFingerprint>, Int> {
+        var absorbed = 0
+        val out = LinkedHashMap(baseline)
+        for ((pkg, before) in baseline) {
+            val now = current[pkg] ?: continue
+            if (before.removed) continue
+            val lost = before.sensitiveGranted - now.sensitiveGranted
+            if (lost.isNotEmpty()) {
+                absorbed += lost.size
+                out[pkg] = before.copy(sensitiveGranted = (before.sensitiveGranted intersect now.sensitiveGranted).toSortedSet())
+            }
+        }
+        return out to absorbed
+    }
+
     private fun detail(c: InventoryChange): String = when (c) {
         is InventoryChange.PermissionGranted -> c.permission
         is InventoryChange.PermissionRevoked -> c.permission

@@ -201,4 +201,21 @@ class InventoryBaselineTest {
         assertEquals("caf\u00e9", safeLabel("caf\u00e9"))
         assertEquals("(no name)", safeLabel("\u3164\u2800\u3164"))
     }
+
+    @Test
+    fun losingAccessIsAbsorbedAndRegrantingIsCaught() {
+        val loc = "android.permission.ACCESS_FINE_LOCATION"
+        val before = map(fp("com.android.chrome", keyA, loc, mic))
+        val revoked = map(fp("com.android.chrome", keyA, mic))
+        val (absorbed, n) = InventoryDiff.absorbRevocations(before, revoked)
+        assertEquals(1, n)
+        assertTrue("no review needed for a removal", InventoryDiff.compare(absorbed, revoked).isEmpty())
+        // Granting it again later is new access and is reported.
+        val regranted = map(fp("com.android.chrome", keyA, loc, mic))
+        val again = InventoryDiff.compare(absorbed, regranted).single()
+        assertTrue(again is InventoryChange.PermissionGranted)
+        assertTrue(NotifyPolicy.notifiable(again))
+        // Unchanged inputs report nothing absorbed.
+        assertEquals(0, InventoryDiff.absorbRevocations(absorbed, revoked).second)
+    }
 }
