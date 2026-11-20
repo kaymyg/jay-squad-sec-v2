@@ -1,4 +1,4 @@
-# Android bridge (ABI v4)
+# Android bridge (ABI v5)
 
 The boundary between the Android app and the Rust security engine. It has
 two front doors over one implementation:
@@ -61,12 +61,46 @@ canonical package identity (package name plus signing-certificate digest).
   identity is evicted (with an alert), never the suspicious ones. A full table
   can't switch detection off.
 
+## App-level events (ABI v5)
+
+Some observations are about an installed app, not a running process: its
+signing certificate changed, it was granted a sensitive permission, or it is
+new and already holds sensitive access. These have their own entry points:
+
+| Rust | C ABI | JNI (`NativeBridge`) |
+|---|---|---|
+| `submit_app_event(handle, package_identity, kind, detail)` | `jss_engine_submit_app_event` | `nativeSubmitAppEvent` |
+| `app_assessment(handle, package_identity)` | `jss_engine_app_assessment` | `nativeAppAssessment` |
+
+- Accepted kinds: `app_signer_changed`, `sensitive_permission_granted`,
+  `new_app_with_sensitive_access`. Process kinds are refused here with
+  `ERR_INVALID`, and these three are refused by `submit`, so the two paths
+  cannot be mixed up. Identity, kind and detail go through the same length,
+  UTF-8 and protocol checks as process events.
+- Each package identity is one app subject, separate from any process of the
+  same package. A new subject beyond `MAX_APP_SUBJECTS` returns
+  `ERR_CAPACITY`; subjects already tracked keep working.
+- `app_assessment` returns the engine's verdict as data, not alert text: the
+  policy action ordinal (0 Allow, 1 Monitor, 2 Restrict, 3 Suspend, 4 Block)
+  and the risk score. An app with no observations is Allow with score 0.
+  - C ABI: writes the action to `out_action` and the score in thousandths to
+    `out_score_milli` (clamped to `0..=u32::MAX`; a non-finite score maps to
+    the maximum). Null output pointers return `ERR_NULL`.
+  - JNI: returns `(action << 32) | score_thousandths`, which is never
+    negative, or the negated error code.
+  - Kotlin: `submitAppEvent(identity, kind, detail)` and
+    `appAssessment(identity)`, which returns `Assessment(action, score)`.
+
+The verdict is information only. Engines stay alert-only and nothing is
+blocked; the action names are the engine's policy levels, not enforcement.
+
 ## Bounds
 
 | Limit | Value | When reached |
 |---|---|---|
 | Live engines per process | 8 | `new` returns 0 |
 | Live identities per engine | 4096 | Lowest-risk idle identity evicted, with an alert |
+| App subjects per engine (`MAX_APP_SUBJECTS`) | 4096 | New subjects refused with `ERR_CAPACITY` |
 | Retired PIDs remembered per engine | 65,536 | Oldest forgotten first |
 | Queued alert lines per engine | 256 | Oldest dropped; next `take` starts with a `[bridge] N alerts dropped` line |
 | Alert line length | 1024 bytes | Truncated at a char boundary |
@@ -80,7 +114,8 @@ checked for bidi-override and zero-width characters by the protocol crate.
 
 `OK 0`, `ERR_NULL 1`, `ERR_INVALID 2`, `ERR_PANIC 3`, `ERR_POISONED 4`,
 `ERR_CAPACITY 5`, `ERR_IDENTITY_MISMATCH 6`, `ERR_BAD_HANDLE 7`,
-`ERR_BUFFER_TOO_SMALL 8`, `ERR_STALE_GENERATION 9`. A panic inside the bridge is caught and reported
+`ERR_BUFFER_TOO_SMALL 8`, `ERR_STALE_GENERATION 9`,
+`ERR_UPDATE_NOT_CONFIGURED 10`, `ERR_UPDATE_REJECTED 11`. A panic inside the bridge is caught and reported
 as `ERR_PANIC`, never unwound into the JVM or a C caller. A poisoned engine
 lock makes only that handle unusable.
 
@@ -94,7 +129,7 @@ queued for the next call. The C ABI needs a buffer of at least
 ## Testing
 
 ```
-cargo test --manifest-path bridge/Cargo.toml   # Rust: C ABI + JNI table pin
+cargo test --manifest-path bridge/Cargo.toml   # Rust: C ABI, app events, JNI table pin
 bridge/jvm/run-jvm-test.sh                     # live JVM, -Xcheck:jni
 ```
 
@@ -103,8 +138,11 @@ the Android app calls. It covers detection flowing out to Java, double close,
 use after close, closing under 8 concurrent submitting threads (20 rounds),
 null arrays, hostile input, identity changes, capacity, and the three
 detection-bypass findings from review (far-future timestamp, revived
-generation, capacity exhausted by missed exits). Android's runtime uses the
-same JNI ABI.
+generation, capacity exhausted by missed exits), and app-level events with
+their structured verdict (a signer change is Restrict at score 60.000,
+process kinds are refused on the app path, null and freed handles fail).
+`tests/app_events.rs` covers the same through the Rust and C ABI, including
+hostile input and the subject cap. Android's runtime uses the same JNI ABI.
 
 Each review regression test was checked to fail when its bug is put back.
 
@@ -165,12 +203,13 @@ matching public key in the Android native release build.
 
 ## Not done yet
 
-- Cross-compile with the Android NDK (arm64-v8a, armeabi-v7a, x86_64) and run
-  on physical, non-rooted devices. Not possible in the current build
-  environment: no NDK.
-- Compile `JaySquadSecEngine.kt` in the Android project. No `kotlinc` was
-  available here; the JNI methods it wraps are tested from Java.
-- Return structured decisions and incident IDs instead of alert text.
+Done since earlier versions: NDK cross-compile for arm64-v8a, armeabi-v7a
+and x86_64 (`android/build-native.sh`, packaged by CI); `JaySquadSecEngine.kt`
+compiled in the Android project; a self-test on a physical phone; structured
+verdicts for app subjects.
+
+- Structured decisions and incident IDs for process events (they still
+  report through alert text only).
 - Fuzz the C ABI and get an independent review of the unsafe code.
 - Keep alert-only as the default. Do not enable Android process killing or
   arbitrary permission revocation, which ordinary apps cannot do.
