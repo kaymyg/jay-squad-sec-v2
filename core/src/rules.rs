@@ -189,6 +189,9 @@ pub enum RulesError {
     ThresholdsInvalid,
     /// The strongest indicators combined cannot reach block_at.
     BlockUnreachable,
+    /// The app signer-change weight is below restrict_at: a patch could make
+    /// a swapped app look harmless.
+    AppSignerTooWeak,
 }
 
 impl core::fmt::Display for RulesError {
@@ -219,6 +222,9 @@ impl core::fmt::Display for RulesError {
                 f,
                 "thresholds must satisfy {MIN_THRESHOLD} <= monitor < restrict < suspend < block <= {MAX_THRESHOLD}, each at least {MIN_THRESHOLD_GAP} apart"
             ),
+            RulesError::AppSignerTooWeak => {
+                write!(f, "app_signer_changed weight must be at least restrict_at")
+            }
             RulesError::BlockUnreachable => write!(
                 f,
                 "block_at is unreachable: the {REACHABILITY_INDICATORS} strongest indicators must sum to at least block_at"
@@ -235,7 +241,7 @@ pub const RULES_MAGIC: &[u8; 4] = b"JSSR";
 /// v2 adds the Android app-level kinds; v1 payloads are rejected (none were
 /// ever released, and a v1 payload has no weights for the new kinds).
 pub const RULES_FORMAT_VERSION: u16 = 2;
-/// Exact encoded size: magic(4) + version(2) + half_life(4) + weights(60) + thresholds(16).
+/// Exact encoded size: magic(4) + version(2) + half_life(4) + weights(4 x KIND_COUNT) + thresholds(16).
 pub const RULES_ENCODED_LEN: usize = 4 + 2 + 4 + 4 * KIND_COUNT + 4 * 4;
 
 impl RulesConfig {
@@ -284,7 +290,11 @@ impl RulesConfig {
                     if !within(w, INDICATOR_WEIGHT) {
                         return Err(RulesError::IndicatorOutOfRange(k));
                     }
-                    indicators.push(w);
+                    // Process and app subjects never share kinds, so app
+                    // weights must not count toward process reachability.
+                    if !k.is_app_level() {
+                        indicators.push(w);
+                    }
                 }
                 WeightClass::Neutral if !within(w, NEUTRAL_WEIGHT) => {
                     return Err(RulesError::NeutralOutOfRange(k))
@@ -310,7 +320,24 @@ impl RulesConfig {
         if strongest < self.block_at {
             return Err(RulesError::BlockUnreachable);
         }
+        // A swapped app must always reach at least Restrict on its own.
+        if self.weight(EventKind::AppSignerChanged) < self.restrict_at {
+            return Err(RulesError::AppSignerTooWeak);
+        }
         Ok(())
+    }
+
+    /// Deterministic verdict for an installed app from its unreviewed
+    /// app-level observations: the weights are summed (never below zero) with
+    /// no time decay, so the same observations always give the same result.
+    /// Non-app kinds are ignored.
+    pub fn assess_app(&self, kinds: &[EventKind]) -> (f32, PolicyAction) {
+        let mut score = 0.0f32;
+        for &k in kinds.iter().filter(|k| k.is_app_level()) {
+            let s = score + self.weight(k);
+            score = if s < 0.0 { 0.0 } else { s };
+        }
+        (score, self.action_for(score))
     }
 
     /// Fixed-size little-endian encoding (zero dependencies).
@@ -481,11 +508,16 @@ mod tests {
 
     #[test]
     fn block_must_stay_reachable() {
-        // Five strongest defaults: 60 (signer) + 40 + 35 + 30 + 25 = 190.
+        // Five strongest process indicators: 40 + 35 + 30 + 25 + 20 = 150.
+        // App-level weights do not count (they never apply to processes).
         let mut r = DEFAULT_RULES;
-        r.block_at = 190.0;
+        r.block_at = 150.0;
         assert_eq!(r.validate(), Ok(()));
-        r.block_at = 200.0;
+        r.weights[kind_index(EventKind::AppSignerChanged)] = 100.0;
+        r.weights[kind_index(EventKind::SensitivePermissionGranted)] = 100.0;
+        r.block_at = 160.0;
+        assert_eq!(r.validate(), Err(RulesError::BlockUnreachable));
+        r.block_at = 160.0;
         assert_eq!(r.validate(), Err(RulesError::BlockUnreachable));
     }
 

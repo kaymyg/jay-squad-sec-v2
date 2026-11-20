@@ -104,7 +104,8 @@ class MainActivity : ComponentActivity() {
                     // with it, and read at action time (not captured), so Accept always
                     // saves exactly what was displayed.
                     var currentFp by remember { mutableStateOf<Map<String, AppFingerprint>>(emptyMap()) }
-                    var verdicts by remember { mutableStateOf<Map<String, EngineVerdicts.Verdict>>(emptyMap()) }
+                    // null = engine unavailable (said on screen), empty = nothing to rate.
+                    var verdicts by remember { mutableStateOf<Map<String, EngineVerdicts.Verdict>?>(emptyMap()) }
                     val labels = remember(apps) { apps.associate { it.packageName to it.label } }
                     val scope = rememberCoroutineScope()
                     // One refresh or accept at a time; a new refresh cancels the old one.
@@ -190,10 +191,12 @@ class MainActivity : ComponentActivity() {
                                     val updated = InventoryDiff.acceptPackages(baselineApps, currentFp, packages)
                                     withContext(Dispatchers.IO) { baselineStore.save(updated.values) }
                                     baselineApps = updated
-                                    changes = InventoryDiff.compare(updated, currentFp)
                                     val snap = currentFp
-                                    val remaining = changes
-                                    verdicts = withContext(Dispatchers.Default) { EngineVerdicts.assess(remaining, snap) }
+                                    val remaining = InventoryDiff.compare(updated, snap)
+                                    val newVerdicts = withContext(Dispatchers.Default) { EngineVerdicts.assess(remaining, snap) }
+                                    // Publish the list and its verdicts together.
+                                    changes = remaining
+                                    verdicts = newVerdicts
                                     if (changes.none(NotifyPolicy::notifiable)) Notifier.cancel(applicationContext)
                                     if (note != null) baselineNote = note
                                 } catch (cancelled: CancellationException) {
@@ -333,13 +336,13 @@ class MainActivity : ComponentActivity() {
                                         }
                                         // Riskiest apps first, by the engine's verdict.
                                         val byPackage = changes.groupBy { it.packageName }.entries
-                                            .sortedByDescending { verdicts[it.key]?.score ?: 0.0 }
+                                            .sortedByDescending { verdicts?.get(it.key)?.score ?: 0.0 }
                                             .associate { it.key to it.value }
                                         byPackage.entries.take(6).forEach { (pkg, pkgChanges) ->
                                             Spacer(Modifier.height(8.dp))
-                                            verdicts[pkg]?.let { v ->
+                                            verdicts?.get(pkg)?.let { v ->
                                                 Text(
-                                                    "Risk: ${v.words} (engine score ${v.score.toInt()})",
+                                                    "Risk: ${v.words} (engine score ${v.shownScore})",
                                                     color = if (v.high) {
                                                         MaterialTheme.colorScheme.error
                                                     } else {
@@ -369,6 +372,13 @@ class MainActivity : ComponentActivity() {
                                             }
                                             Text(
                                                 rejectHint(pkgChanges),
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                        }
+                                        if (verdicts == null && changes.any(NotifyPolicy::notifiable)) {
+                                            Text(
+                                                "Risk ratings are unavailable: the security engine did not respond.",
+                                                color = MaterialTheme.colorScheme.error,
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
                                         }

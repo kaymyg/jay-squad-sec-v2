@@ -91,6 +91,11 @@ new and already holds sensitive access. These have their own entry points:
   - Kotlin: `submitAppEvent(identity, kind, detail)` and
     `appAssessment(identity)`, which returns `Assessment(action, score)`.
 
+App verdicts do not use the engine clock: the score is the sum of the app's
+observation weights under the active rules, with no time decay, so the same
+observations always give the same verdict. A change in verdict is reported
+as an `[app]` alert line.
+
 The verdict is information only. Engines stay alert-only and nothing is
 blocked; the action names are the engine's policy levels, not enforcement.
 
@@ -101,6 +106,7 @@ blocked; the action names are the engine's policy levels, not enforcement.
 | Live engines per process | 8 | `new` returns 0 |
 | Live identities per engine | 4096 | Lowest-risk idle identity evicted, with an alert |
 | App subjects per engine (`MAX_APP_SUBJECTS`) | 4096 | New subjects refused with `ERR_CAPACITY` |
+| Observations per app subject (`MAX_APP_EVENTS`) | 256 | Further events refused with `ERR_CAPACITY` |
 | Retired PIDs remembered per engine | 65,536 | Oldest forgotten first |
 | Queued alert lines per engine | 256 | Oldest dropped; next `take` starts with a `[bridge] N alerts dropped` line |
 | Alert line length | 1024 bytes | Truncated at a char boundary |
