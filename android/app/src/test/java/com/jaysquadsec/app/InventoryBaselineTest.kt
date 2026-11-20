@@ -79,6 +79,20 @@ class InventoryBaselineTest {
     }
 
     @Test
+    fun acceptingOnePackageLeavesOthersFlagged() {
+        val before = map(fp("com.a.app", keyA), fp("com.b.app", keyA), fp("com.gone.app"))
+        val now = map(fp("com.a.app", keyA, sms), fp("com.b.app", keyB))
+        val accepted = InventoryDiff.acceptPackage(before, now, "com.a.app")
+        val left = InventoryDiff.compare(accepted, now)
+        assertTrue(left.none { it.packageName == "com.a.app" })
+        assertTrue(left.any { it is InventoryChange.SignerChanged && it.packageName == "com.b.app" })
+        assertTrue(left.any { it is InventoryChange.AppRemoved && it.packageName == "com.gone.app" })
+        // Accepting a removal drops it from the baseline.
+        val dropped = InventoryDiff.acceptPackage(accepted, now, "com.gone.app")
+        assertTrue("com.gone.app" !in dropped)
+    }
+
+    @Test
     fun codecRoundTrips() {
         val apps = listOf(fp("com.a.app", "$keyA,$keyB", sms, mic), fp("com.b.app", ""))
         assertEquals(apps.associateBy { it.packageName }, BaselineCodec.decode(BaselineCodec.encode(apps)))
