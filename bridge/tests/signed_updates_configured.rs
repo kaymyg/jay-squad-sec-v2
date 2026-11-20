@@ -29,11 +29,14 @@ fn keypair(seed: [u8; 32]) -> KeyPair {
 }
 
 fn test_public_key_hex() -> String {
+    use std::fmt::Write;
     keypair(TEST_ONLY_SEED)
         .pk
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// True when this build embeds the test key; otherwise skip (or fail if CI
