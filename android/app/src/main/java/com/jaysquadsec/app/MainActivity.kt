@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
                     var apps by remember { mutableStateOf<List<AppObservation>>(emptyList()) }
                     var loading by remember { mutableStateOf(true) }
                     var error by remember { mutableStateOf<String?>(null) }
+                    var engine by remember { mutableStateOf<EngineSelfTest.Result?>(null) }
                     val scope = rememberCoroutineScope()
 
                     suspend fun refresh() {
@@ -58,6 +59,9 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    LaunchedEffect(Unit) {
+                        engine = withContext(Dispatchers.Default) { EngineSelfTest.run() }
+                    }
                     LaunchedEffect(Unit) { refresh() }
 
                     Column(
@@ -76,6 +80,18 @@ class MainActivity : ComponentActivity() {
                                 Text("Inventory-only preview")
                                 Text(
                                     "No background monitoring or network blocking is active.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text("Security engine", style = MaterialTheme.typography.titleSmall)
+                                val result = engine
+                                Text(
+                                    result?.summary ?: "Checking native engine...",
+                                    color = if (result != null && !result.ok) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
