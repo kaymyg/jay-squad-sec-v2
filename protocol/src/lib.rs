@@ -135,6 +135,9 @@ pub fn kind_from_wire(s: &str) -> Option<EventKind> {
         "stable_tick" => StableTick,
         "temp_execution" => TempExecution,
         "deleted_executable" => DeletedExecutable,
+        "app_signer_changed" => AppSignerChanged,
+        "sensitive_permission_granted" => SensitivePermissionGranted,
+        "new_app_with_sensitive_access" => NewAppWithSensitiveAccess,
         _ => return None,
     })
 }
@@ -159,6 +162,9 @@ pub fn wire_from_kind(k: EventKind) -> &'static str {
         StableTick => "stable_tick",
         TempExecution => "temp_execution",
         DeletedExecutable => "deleted_executable",
+        AppSignerChanged => "app_signer_changed",
+        SensitivePermissionGranted => "sensitive_permission_granted",
+        NewAppWithSensitiveAccess => "new_app_with_sensitive_access",
     }
 }
 
@@ -298,13 +304,8 @@ mod tests {
 
     #[test]
     fn every_kind_round_trips() {
-        use EventKind::*;
-        let all = [
-            ProcessStart, ProcessExit, SignedBinary, UnsignedBinary, NetworkConnect,
-            FileWrite, UnsignedModuleLoad, RwxAlloc, RemoteThreadInjection, CredentialAccess,
-            PersistenceWrite, PrivilegeEscalation, StableTick, TempExecution, DeletedExecutable,
-        ];
-        for k in all {
+        // The core's canonical list, so a newly added kind is always covered.
+        for k in jay_squad_sec::rules::KINDS {
             let s = wire_from_kind(k);
             assert_eq!(kind_from_wire(s), Some(k), "round trip failed for {s}");
         }

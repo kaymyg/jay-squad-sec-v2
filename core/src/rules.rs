@@ -28,7 +28,7 @@ use crate::event::EventKind;
 use crate::risk::PolicyAction;
 
 /// Number of event kinds. Must match [`KINDS`]; enforced by a test.
-pub const KIND_COUNT: usize = 15;
+pub const KIND_COUNT: usize = 18;
 
 /// Canonical kind order used for the weights array and the wire encoding.
 /// Never reorder: append only, and bump [`RULES_FORMAT_VERSION`].
@@ -48,6 +48,10 @@ pub const KINDS: [EventKind; KIND_COUNT] = [
     EventKind::StableTick,
     EventKind::TempExecution,
     EventKind::DeletedExecutable,
+    // Format v2: Android app-level kinds.
+    EventKind::AppSignerChanged,
+    EventKind::SensitivePermissionGranted,
+    EventKind::NewAppWithSensitiveAccess,
 ];
 
 /// Index of a kind in [`KINDS`]. Exhaustive match: adding an EventKind is a
@@ -70,6 +74,9 @@ pub fn kind_index(k: EventKind) -> usize {
         StableTick => 12,
         TempExecution => 13,
         DeletedExecutable => 14,
+        AppSignerChanged => 15,
+        SensitivePermissionGranted => 16,
+        NewAppWithSensitiveAccess => 17,
     }
 }
 
@@ -89,7 +96,8 @@ fn class(k: EventKind) -> WeightClass {
     match k {
         UnsignedBinary | UnsignedModuleLoad | RwxAlloc | RemoteThreadInjection
         | CredentialAccess | PersistenceWrite | PrivilegeEscalation | TempExecution
-        | DeletedExecutable => WeightClass::Indicator,
+        | DeletedExecutable | AppSignerChanged | SensitivePermissionGranted
+        | NewAppWithSensitiveAccess => WeightClass::Indicator,
         ProcessStart | ProcessExit | NetworkConnect | FileWrite => WeightClass::Neutral,
         SignedBinary | StableTick => WeightClass::GoodEvidence,
     }
@@ -145,6 +153,10 @@ pub const DEFAULT_RULES: RulesConfig = RulesConfig {
         -5.0,  // StableTick
         20.0,  // TempExecution
         30.0,  // DeletedExecutable
+        // Android app-level, calibrated against the thresholds below:
+        60.0,  // AppSignerChanged: alone reaches Restrict (a swapped app)
+        15.0,  // SensitivePermissionGranted: per permission; several escalate
+        10.0,  // NewAppWithSensitiveAccess: plus one grant event per permission held
     ],
     monitor_at: 25.0,
     restrict_at: 50.0,
@@ -220,7 +232,9 @@ impl std::error::Error for RulesError {}
 /// Magic bytes for encoded rules.
 pub const RULES_MAGIC: &[u8; 4] = b"JSSR";
 /// Rules wire-format version.
-pub const RULES_FORMAT_VERSION: u16 = 1;
+/// v2 adds the Android app-level kinds; v1 payloads are rejected (none were
+/// ever released, and a v1 payload has no weights for the new kinds).
+pub const RULES_FORMAT_VERSION: u16 = 2;
 /// Exact encoded size: magic(4) + version(2) + half_life(4) + weights(60) + thresholds(16).
 pub const RULES_ENCODED_LEN: usize = 4 + 2 + 4 + 4 * KIND_COUNT + 4 * 4;
 
@@ -467,10 +481,11 @@ mod tests {
 
     #[test]
     fn block_must_stay_reachable() {
-        let mut r = DEFAULT_RULES; // defaults: five strongest sum to 150
-        r.block_at = 150.0;
+        // Five strongest defaults: 60 (signer) + 40 + 35 + 30 + 25 = 190.
+        let mut r = DEFAULT_RULES;
+        r.block_at = 190.0;
         assert_eq!(r.validate(), Ok(()));
-        r.block_at = 160.0;
+        r.block_at = 200.0;
         assert_eq!(r.validate(), Err(RulesError::BlockUnreachable));
     }
 
