@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * App-facing handle to one alert-only Jay Squad Sec engine (bridge ABI v3).
+ * App-facing handle to one alert-only Jay Squad Sec engine (bridge ABI v4).
  *
  * Ownership contract, enforced on both sides:
  * - The native handle is an opaque registry ID, never a pointer. Even if this
