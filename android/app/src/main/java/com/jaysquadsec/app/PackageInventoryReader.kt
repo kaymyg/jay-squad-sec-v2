@@ -101,8 +101,12 @@ class PackageInventoryReader(context: Context) {
             info.signatures
         } ?: return null
 
-        val signer = signatures.firstOrNull() ?: return null
-        val digest = MessageDigest.getInstance("SHA-256").digest(signer.toByteArray())
-        return digest.joinToString("") { byte -> "%02x".format(byte) }
+        if (signatures.isEmpty()) return null
+        // Preserve the complete current signer set; do not collapse a
+        // multi-signer package to whichever certificate happens to be first.
+        return signatures.map { signature ->
+            val digest = MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
+            digest.joinToString("") { byte -> "%02x".format(byte) }
+        }.sorted().joinToString(",")
     }
 }
