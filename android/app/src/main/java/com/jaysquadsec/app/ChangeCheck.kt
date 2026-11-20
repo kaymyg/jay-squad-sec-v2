@@ -68,11 +68,11 @@ object ChangeCheck {
                     if (decision.toNotify.isNotEmpty()) {
                         // Show every unreviewed change, not only the new ones,
                         // so this post never hides an earlier unhandled alert.
-                        val verdicts = EngineVerdicts.assess(decision.unreviewed, nowMap)
+                        val verdicts = EngineVerdicts.assess(decision.unreviewed, nowMap).orEmpty()
                         val ordered = decision.unreviewed.sortedByDescending { verdicts[it.packageName]?.score ?: 0.0 }
                         val lines = ordered.map { describe(it, labels[it.packageName]) }
                         val top = verdicts.filterValues { it.high }.maxByOrNull { it.value.score }?.key
-                        val title = notificationTitle(ordered, top?.let { labels[it] ?: it })
+                        val title = notificationTitle(ordered, top?.let { labels[it] }, top)
                         posted = Notifier.show(context, title, lines.first(), lines)
                     }
                     atomicWrite(dir, LEDGER_FILE, NotifyPolicy.encode(NotifyPolicy.ledgerAfter(decision, ledger, posted)))

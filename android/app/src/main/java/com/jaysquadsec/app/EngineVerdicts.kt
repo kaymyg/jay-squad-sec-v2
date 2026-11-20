@@ -4,25 +4,28 @@ import com.jaysquadsec.bridge.JaySquadSecEngine
 
 /**
  * Runs the native engine over the unreviewed changes and returns its verdict
- * per app. A fresh engine is used for every assessment, so the result is a
- * deterministic function of the changes on screen: signals on the same app
- * add up (for example a changed certificate plus SMS access), and accepting
- * or undoing a change lowers the verdict at the next scan.
+ * per app. App verdicts are a plain sum of observation weights with no time
+ * decay, and a fresh engine is used each time, so the same changes always
+ * give the same verdict: signals on the same app add up (for example a
+ * changed certificate plus SMS access), and accepting or undoing a change
+ * lowers the verdict at the next scan.
  *
  * Alert-only: the verdict is shown and used to word notifications; nothing is
- * blocked. If the engine is unavailable, no verdicts are returned and the app
- * works as before.
+ * blocked. Returns null if the engine is unavailable or fails, so the screen
+ * can say so instead of silently showing nothing.
  */
 object EngineVerdicts {
     data class Verdict(val actionOrdinal: Int, val score: Double) {
         val words: String get() = RiskWords.of(actionOrdinal)
+        /** Rounded for display (truncation would show 14 for 14.999). */
+        val shownScore: Int get() = kotlin.math.round(score).toInt()
         val high: Boolean get() = actionOrdinal >= 2
     }
 
     fun assess(
         changes: List<InventoryChange>,
         current: Map<String, AppFingerprint>,
-    ): Map<String, Verdict> {
+    ): Map<String, Verdict>? {
         val byPackage = changes.groupBy { it.packageName }
             .mapValues { (_, list) -> list.flatMap(EngineEvents::of) }
             .filterValues { it.isNotEmpty() }
@@ -36,8 +39,11 @@ object EngineVerdicts {
                     Verdict(a.action.ordinal, a.score)
                 }
             }
-        } catch (t: Throwable) {
-            emptyMap()
+        } catch (e: Exception) {
+            null
+        } catch (e: LinkageError) {
+            // Library missing for this CPU, or ABI mismatch at load.
+            null
         }
     }
 }

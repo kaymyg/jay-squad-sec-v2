@@ -31,6 +31,16 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Android app-level kinds describe an installed app, not a process.
+    pub fn is_app_level(self) -> bool {
+        matches!(
+            self,
+            EventKind::AppSignerChanged
+                | EventKind::SensitivePermissionGranted
+                | EventKind::NewAppWithSensitiveAccess
+        )
+    }
+
     /// Delivery priority: higher = drained first.
     pub fn severity(self) -> u8 {
         use EventKind::*;

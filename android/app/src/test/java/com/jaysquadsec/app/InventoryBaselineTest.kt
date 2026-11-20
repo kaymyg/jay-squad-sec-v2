@@ -245,6 +245,9 @@ class InventoryBaselineTest {
     fun riskWordsMatchEngineActions() {
         assertEquals(listOf("Low", "Watch", "High", "Very high", "Critical"), (0..4).map(RiskWords::of))
         assertEquals("Critical", RiskWords.of(99))
-        assertEquals("High risk: Bank (fake)", notificationTitle(listOf(InventoryChange.PermissionGranted("com.a", sms)), "Bank\n(fake)"))
+        val one = listOf(InventoryChange.PermissionGranted("com.evil.x", sms))
+        assertEquals("High risk: WhatsApp (com.evil.x)", notificationTitle(one, "WhatsApp\n", "com.evil.x"))
+        val two = one + InventoryChange.AppAdded("com.b", setOf(mic))
+        assertEquals("High risk: WhatsApp (com.evil.x) +1 more", notificationTitle(two, "WhatsApp", "com.evil.x"))
     }
 }

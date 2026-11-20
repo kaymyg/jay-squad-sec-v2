@@ -147,3 +147,43 @@ fn c_abi_assessment_checks_pointers_and_reports_thousandths() {
     assert_eq!(score_milli(-3.0), 0);
     assert_eq!(score_milli(1e30), u32::MAX);
 }
+
+#[test]
+fn verdicts_are_deterministic_at_exact_thresholds() {
+    with_engine(|h| {
+        assert_eq!(submit_app_event(h, APP, b"app_signer_changed", b""), OK);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            submit_app_event(h, APP, b"sensitive_permission_granted", b""),
+            OK
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // 60 + 15 = 75 is exactly Suspend; time passing must not change it.
+        assert_eq!(app_assessment(h, APP), Ok((3, 75.0)));
+        let alerts = String::from_utf8(take_alerts(h, 1 << 16).unwrap()).unwrap();
+        assert!(
+            alerts.contains("Restrict -> Suspend"),
+            "escalation alerted: {alerts}"
+        );
+        assert!(
+            !alerts.contains("pid"),
+            "app alerts never talk about processes"
+        );
+    });
+}
+
+#[test]
+fn observations_per_app_are_capped() {
+    with_engine(|h| {
+        for _ in 0..MAX_APP_EVENTS {
+            assert_eq!(
+                submit_app_event(h, APP, b"sensitive_permission_granted", b""),
+                OK
+            );
+        }
+        assert_eq!(
+            submit_app_event(h, APP, b"sensitive_permission_granted", b""),
+            ERR_CAPACITY
+        );
+    });
+}

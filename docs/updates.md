@@ -25,8 +25,11 @@ has no code-injection surface.
     cancel an injection + credential-theft chain);
   - half-life in [10 s, 1 h];
   - 5 <= monitor < restrict < suspend < block <= 400, each step at least 5;
-  - reachability: the five strongest indicators must sum to at least block_at
-    (190 under the defaults: 60 + 40 + 35 + 30 + 25).
+  - reachability: the five strongest process indicators must sum to at least
+    block_at (150 under the defaults: 40 + 35 + 30 + 25 + 20). App-level
+    weights do not count, because app and process subjects never share kinds;
+  - the app signer-change weight must be at least restrict_at, so no patch
+    can make a swapped app look harmless.
 
   A property test runs a full attack chain through the engine under defaults
   and the most lenient configs validation accepts, and requires Block in every
@@ -103,10 +106,14 @@ What changed for builders:
   every key, so an older text file fails with `missing keys: ...` until they
   are added.
 - **The new kinds are indicators,** so their weights must be in [1, 100] and
-  cannot be set to 0. With the signer change at 60 the five strongest default
-  indicators sum to 190, so with the default weights `block_at` may be set
-  as high as 190 (the overall cap is still 400, and reachability always
-  applies).
+  cannot be set to 0. `app_signer_changed` must also be at least
+  `restrict_at`: raising thresholds means raising it too. App-level weights
+  are excluded from the reachability check, which stays 150 under the
+  defaults.
+- **App verdicts are deterministic.** An app's score is the sum of the weights
+  of its unreviewed app-level observations, with no time decay, so the same
+  changes always give the same verdict (exact threshold sums such as
+  60 + 15 = 75 stay exactly Suspend).
 
 ## Builder workflow (offline machine)
 

@@ -91,6 +91,8 @@ pub const MAX_ENGINES: usize = 8;
 pub const MAX_IDENTITIES: usize = 4096;
 /// Maximum app-level subjects (installed apps with observations) per engine.
 pub const MAX_APP_SUBJECTS: usize = 4096;
+/// Maximum app-level observations remembered per app subject.
+pub const MAX_APP_EVENTS: usize = 256;
 /// Maximum PIDs whose highest retired generation is remembered per engine
 /// (oldest forgotten first). Bounds memory against a huge PID space.
 pub const MAX_RETIRED_PIDS: usize = 65_536;
@@ -114,9 +116,10 @@ struct Identity {
 
 struct EngineState {
     engine: Engine,
-    /// App-level subjects keyed by package identity: observations about an
-    /// installed app (not a running process), e.g. a signer change.
-    apps: BTreeMap<String, Rtid>,
+    /// App-level subjects keyed by package identity: the observations about
+    /// an installed app (not a running process), e.g. a signer change. Their
+    /// verdict is a pure function of these (no clock, no decay).
+    apps: BTreeMap<String, Vec<EventKind>>,
     /// Trusted monotonic time origin for this engine.
     started: Instant,
     // PID alone is not identity: Android reuses PIDs. The adapter supplies a
@@ -654,12 +657,7 @@ pub extern "C" fn jss_engine_free(handle: JssHandle) -> i32 {
 }
 
 fn is_app_kind(k: EventKind) -> bool {
-    matches!(
-        k,
-        EventKind::AppSignerChanged
-            | EventKind::SensitivePermissionGranted
-            | EventKind::NewAppWithSensitiveAccess
-    )
+    k.is_app_level()
 }
 
 /// Submit an app-level observation about an installed app (no process), such
@@ -697,24 +695,21 @@ pub fn submit_app_event(
         }
         let inst = lookup(handle)?;
         let mut st = inst.state.lock().map_err(|_| ERR_POISONED)?;
-        let now = st.now_ms();
-        let rtid = match st.apps.get(&identity) {
-            Some(&r) => r,
-            None => {
-                if st.apps.len() >= MAX_APP_SUBJECTS {
-                    return Err(ERR_CAPACITY);
-                }
-                // Distinct seed from process identities, so an app subject and
-                // a process of the same package never share a runtime ID.
-                let seed = format!("app:{identity}");
-                let r = st.engine.adopt(&identity, seed.as_bytes(), now);
-                st.apps.insert(identity, r);
-                r
-            }
-        };
-        st.engine.bus.publish(validated.into_event(rtid));
-        for line in st.engine.tick(now) {
-            st.push_alert(line);
+        if !st.apps.contains_key(&identity) && st.apps.len() >= MAX_APP_SUBJECTS {
+            return Err(ERR_CAPACITY);
+        }
+        let rules = *st.engine.rules();
+        let kinds = st.apps.entry(identity.clone()).or_default();
+        if kinds.len() >= MAX_APP_EVENTS {
+            return Err(ERR_CAPACITY);
+        }
+        let (_, before) = rules.assess_app(kinds);
+        kinds.push(validated.kind);
+        let (score, after) = rules.assess_app(kinds);
+        if after != before {
+            st.push_alert(format!(
+                "[app] {identity} {before:?} -> {after:?} (risk {score:.1})"
+            ));
         }
         Ok(())
     });
@@ -724,25 +719,21 @@ pub fn submit_app_event(
     }
 }
 
-/// The engine's current verdict for an app subject: policy action ordinal
-/// (0 Allow, 1 Monitor, 2 Restrict, 3 Suspend, 4 Block) and risk score.
-/// An app with no observations is `(0, 0.0)`. Structured, so callers never
-/// parse alert text.
+/// The engine's verdict for an app subject under the active (possibly signed)
+/// rules: policy action ordinal (0 Allow, 1 Monitor, 2 Restrict, 3 Suspend,
+/// 4 Block) and risk score. Deterministic: the weights of its observations
+/// are summed, with no time decay. An app with no observations is `(0, 0.0)`.
+/// Structured, so callers never parse alert text.
 pub fn app_assessment(handle: JssHandle, package_identity: &[u8]) -> Result<(u32, f32), i32> {
     guarded(|| {
         let identity = checked_text(package_identity, MAX_IDENTITY_LEN, false)?;
         let inst = lookup(handle)?;
-        let mut st = inst.state.lock().map_err(|_| ERR_POISONED)?;
-        let now = st.now_ms();
-        for line in st.engine.tick(now) {
-            st.push_alert(line);
-        }
-        let Some(&rtid) = st.apps.get(&identity) else {
+        let st = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        let Some(kinds) = st.apps.get(&identity) else {
             return Ok((0, 0.0));
         };
-        let score = st.engine.process(rtid).map_or(0.0, |p| p.risk.score);
-        let action = st.engine.rules().action_for(score) as u32;
-        Ok((action, score))
+        let (score, action) = st.engine.rules().assess_app(kinds);
+        Ok((action as u32, score))
     })
 }
 
