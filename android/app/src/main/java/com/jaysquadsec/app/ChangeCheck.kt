@@ -50,7 +50,10 @@ object ChangeCheck {
                     )
                 }
                 is BaselineStore.Loaded.Ok -> {
-                    val changes = InventoryDiff.compare(stored.apps, current.associateBy { it.packageName })
+                    val nowMap = current.associateBy { it.packageName }
+                    val (absorbed, removedCount) = InventoryDiff.absorbRevocations(stored.apps, nowMap)
+                    if (removedCount > 0) store.save(absorbed.values)
+                    val changes = InventoryDiff.compare(absorbed, nowMap)
                     val ledgerFile = File(dir, LEDGER_FILE)
                     val ledger = runCatching {
                         if (ledgerFile.isFile && ledgerFile.length() < 2_000_000) {

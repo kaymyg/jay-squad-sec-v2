@@ -176,4 +176,22 @@ if find_text "$SHORT access granted to"; then fail "warning did not clear after 
 if adb shell dumpsys notification --noredact | grep -q "pkg=$PKG"; then fail "stale notification not removed"; fi
 echo "warning and notification cleared"
 
+echo "== 8: accepted access, then removed: no review; granted again: flagged"
+relaunch() { adb shell input keyevent KEYCODE_HOME; sleep 1; adb shell am start -W -n "$ACT" >/dev/null; sleep 6; }
+adb shell pm grant "$TARGET" "$PERM"
+relaunch
+find_text "$SHORT access granted to" || fail "grant not shown before accept"
+tap_text "$OUT/ui-$step.xml" "Accept"
+sleep 3
+adb shell pm revoke "$TARGET" "$PERM"
+relaunch
+no_crash "after removal"
+scroll_top
+if find_text "access removed from"; then fail "a permission removal was listed for review"; fi
+adb shell pm grant "$TARGET" "$PERM"
+relaunch
+scroll_top
+find_text "$SHORT access granted to" || fail "re-granted access after a removal was not flagged"
+echo "removal absorbed, re-grant flagged"
+
 echo "SMOKE PASS"
