@@ -200,6 +200,17 @@ impl UpdateStore {
 
     /// The active rules. Never fails: uses the highest verified version among
     /// the current and previous state, else the compiled-in defaults.
+    /// True if either state file exists on disk (as anything at all). When
+    /// [`load`](Self::load) nonetheless reports [`StateSource::Default`], the
+    /// stored state was tampered with, corrupted or is below the minimum
+    /// version, and callers should raise an alert rather than treat it as a
+    /// fresh install.
+    pub fn state_files_present(&self) -> bool {
+        [STATE_FILE, PREV_FILE]
+            .iter()
+            .any(|name| fs::symlink_metadata(self.path(name)).is_ok())
+    }
+
     pub fn load(&self) -> InstalledRules {
         self.load_with_patch().0
     }
