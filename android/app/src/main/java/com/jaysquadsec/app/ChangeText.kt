@@ -35,9 +35,29 @@ internal fun safeLabel(raw: String?, max: Int = 40): String {
                 }
             }
         }
-    }.trim().replace(Regex("(?U)\\s+"), " ")
+    }.let(::collapseSpaces)
     if (cleaned.isEmpty()) return "(no name)"
     return if (cleaned.length <= max) cleaned else cleaned.take(max - 1).trimEnd() + "…"
+}
+
+/**
+ * Collapse runs of whitespace (any Unicode space) to one space and trim.
+ * Plain code, not a regex: Android's regex engine rejects flags such as
+ * (?U) that desktop Java accepts, which crashed the app on a real phone.
+ */
+internal fun collapseSpaces(text: String): String {
+    val out = StringBuilder(text.length)
+    var pendingSpace = false
+    for (c in text) {
+        if (Character.isWhitespace(c) || Character.isSpaceChar(c)) {
+            pendingSpace = out.isNotEmpty()
+        } else {
+            if (pendingSpace) out.append(' ')
+            pendingSpace = false
+            out.append(c)
+        }
+    }
+    return out.toString()
 }
 
 /**
