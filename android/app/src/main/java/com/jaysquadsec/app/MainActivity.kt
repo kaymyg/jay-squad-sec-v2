@@ -1,11 +1,15 @@
 package com.jaysquadsec.app
 
+import android.Manifest
+import android.app.ActivityManager
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -42,10 +46,18 @@ class MainActivity : ComponentActivity() {
     /** Bumped on every resume, so returning from Settings rescans. */
     private val resumeTick = mutableIntStateOf(0)
 
+    private val notifyAsk = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        resumeTick.intValue++
+    }
+
     override fun onResume() {
         super.onResume()
         resumeTick.intValue++
     }
+
+    private fun backgroundRestricted(): Boolean =
+        Build.VERSION.SDK_INT >= 28 &&
+            getSystemService(ActivityManager::class.java)?.isBackgroundRestricted == true
 
     /** Android lets only the user change another app's permissions or remove it. */
     private fun openAppSettings(packageName: String) {
@@ -61,6 +73,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val inventory = PackageInventoryReader(applicationContext)
         val baselineStore = BaselineStore(applicationContext.filesDir)
+        ChangeCheckJob.schedule(applicationContext)
+        if (savedInstanceState == null && !Notifier.canNotify(this)) {
+            notifyAsk.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         setContent {
             MaterialTheme(colorScheme = lightColorScheme()) {
@@ -142,6 +158,43 @@ class MainActivity : ComponentActivity() {
                                     "No background monitoring or network blocking is active.",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
+                                Spacer(Modifier.height(8.dp))
+                                Text("Background checks", style = MaterialTheme.typography.titleSmall)
+                                val tick = resumeTick.intValue
+                                val last = remember(tick) { ChangeCheck.lastRunMs(applicationContext) }
+                                val notifyOk = remember(tick) { Notifier.canNotify(applicationContext) }
+                                val restricted = remember(tick) { backgroundRestricted() }
+                                Text(
+                                    "About every hour, alerts by notification. Last check: " +
+                                        (last?.let {
+                                            java.text.DateFormat.getDateTimeInstance(
+                                                java.text.DateFormat.MEDIUM,
+                                                java.text.DateFormat.SHORT,
+                                            ).format(java.util.Date(it))
+                                        } ?: "not yet"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                if (!notifyOk) {
+                                    Text(
+                                        "Notifications are off, so changes only show here. " +
+                                            "Turn them on in this app's settings.",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (restricted) {
+                                    Text(
+                                        "Android is restricting this app in the background, so checks may not run. " +
+                                            "In this app's settings, set Battery to No restriction.",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (!notifyOk || restricted) {
+                                    OutlinedButton(onClick = { openAppSettings(packageName) }) {
+                                        Text("Open this app's settings")
+                                    }
+                                }
                                 Spacer(Modifier.height(8.dp))
                                 Text("Security engine", style = MaterialTheme.typography.titleSmall)
                                 val result = engine
@@ -276,21 +329,4 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-}
-
-private fun describe(change: InventoryChange, name: String): String = when (change) {
-    is InventoryChange.SignerChanged ->
-        "Signing certificate changed: $name. It was reinstalled from a different source " +
-            "or its developer rotated the key. Check where it came from."
-    is InventoryChange.PermissionGranted ->
-        "New access: $name can now use ${SensitivePermissions.shortName(change.permission)}"
-    is InventoryChange.AppAdded ->
-        if (change.sensitive.isEmpty()) {
-            "New app: $name"
-        } else {
-            "New app: $name, with ${change.sensitive.joinToString { SensitivePermissions.shortName(it) }}"
-        }
-    is InventoryChange.PermissionRevoked ->
-        "Access removed: $name no longer has ${SensitivePermissions.shortName(change.permission)}"
-    is InventoryChange.AppRemoved -> "Removed or hidden: $name"
 }

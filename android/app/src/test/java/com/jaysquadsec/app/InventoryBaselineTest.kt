@@ -119,7 +119,7 @@ class InventoryBaselineTest {
         val loaded = store.load() as BaselineStore.Loaded.Ok
         assertTrue(loaded.recordedAtMs > 0)
         assertEquals(apps.associateBy { it.packageName }, loaded.apps)
-        assertTrue(!tmp.root.resolve("${BaselineStore.FILE}.tmp").exists())
+        assertTrue("no temp files left", tmp.root.listFiles()!!.none { it.name.endsWith(".tmp") })
         tmp.root.resolve(BaselineStore.FILE).writeText("garbage")
         assertTrue(store.load() is BaselineStore.Loaded.Corrupt)
     }
