@@ -69,8 +69,9 @@ class MainActivity : ComponentActivity() {
     private fun openAppSettings(packageName: String) {
         runCatching {
             startActivity(
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                // Same task (no NEW_TASK): Back returns here, and the screen
+                // rescans on resume.
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)),
             )
         }
     }
@@ -151,6 +152,8 @@ class MainActivity : ComponentActivity() {
                             baselineNote = note
                             baselineApps = base
                             snapshot++
+                            // Nothing left to review: remove a stale alert from the shade.
+                            if (found.none(NotifyPolicy::notifiable)) Notifier.cancel(applicationContext)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
@@ -180,6 +183,7 @@ class MainActivity : ComponentActivity() {
                                     withContext(Dispatchers.IO) { baselineStore.save(updated.values) }
                                     baselineApps = updated
                                     changes = InventoryDiff.compare(updated, currentFp)
+                                    if (changes.none(NotifyPolicy::notifiable)) Notifier.cancel(applicationContext)
                                     if (note != null) baselineNote = note
                                 } catch (cancelled: CancellationException) {
                                     throw cancelled
@@ -334,10 +338,14 @@ class MainActivity : ComponentActivity() {
                                                 Button(onClick = { accept(setOf(pkg), null) }) { Text("Accept") }
                                                 if (pkg in currentFp) {
                                                     OutlinedButton(onClick = { openAppSettings(pkg) }) {
-                                                        Text("Reject: open settings")
+                                                        Text(rejectLabel(pkgChanges))
                                                     }
                                                 }
                                             }
+                                            Text(
+                                                rejectHint(pkgChanges),
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
                                         }
                                         if (byPackage.size > 6) {
                                             Text("+ ${byPackage.size - 6} more apps with changes", style = MaterialTheme.typography.bodySmall)

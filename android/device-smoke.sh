@@ -40,6 +40,37 @@ no_crash() {
   fi
 }
 
+# Find a text on screen, scrolling down a few times if needed. Leaves the
+# matching dump in $OUT/ui-$step.xml. Returns 1 if not found.
+find_text() {
+  local text=$1 i
+  for i in 0 1 2 3; do
+    ui > /dev/null
+    grep -qF "$text" "$OUT/ui-$step.xml" && return 0
+    adb shell input swipe 500 1600 500 600 300
+    sleep 1
+  done
+  return 1
+}
+
+scroll_top() { for _ in 1 2 3 4; do adb shell input swipe 500 600 500 1600 200; done; sleep 1; }
+
+tap_text() {  # tap the centre of the node whose text starts with $2
+  local xml=$1 text=$2
+  read -r x y < <(python3 - "$xml" "$text" <<'PYTEXT'
+import re, sys, html
+xml, want = sys.argv[1], sys.argv[2]
+for node in re.findall(r"<node [^>]*>", open(xml).read()):
+    m = re.search(r' text="([^"]*)"', node)
+    if m and html.unescape(m.group(1)).startswith(want):
+        a, b, c, d = map(int, re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node).groups())
+        print((a + c) // 2, (b + d) // 2); break
+PYTEXT
+)
+  [ -n "${x:-}" ] || fail "text '$text' not found to tap"
+  adb shell input tap "$x" "$y"
+}
+
 tap_resource() {  # tap the centre of the node with this resource-id suffix
   local xml=$1 id=$2
   read -r x y < <(python3 - "$xml" "$id" <<'PY'
@@ -60,6 +91,22 @@ adb shell 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done'
 adb install -r "$APK"
 adb logcat -c
 adb logcat -b crash -c || true
+
+# Target for the grant/reject test: a launcher app whose runtime permission
+# can be revoked, so the first baseline records it as off.
+TARGET=""; PERM=""; SHORT=""
+for cand in "com.android.camera2 android.permission.RECORD_AUDIO" \
+            "com.android.camera2 android.permission.ACCESS_FINE_LOCATION" \
+            "com.android.contacts android.permission.READ_CONTACTS" \
+            "com.android.dialer android.permission.RECORD_AUDIO" \
+            "com.google.android.dialer android.permission.RECORD_AUDIO"; do
+  read -r cpkg cperm <<< "$cand"
+  if adb shell pm list packages | tr -d '\r' | grep -qx "package:$cpkg" && adb shell pm revoke "$cpkg" "$cperm" 2>/dev/null; then
+    TARGET=$cpkg; PERM=$cperm; SHORT=${cperm##*.}; break
+  fi
+done
+[ -n "$TARGET" ] || fail "no app on this image to test grant/reject with"
+echo "grant/reject target: $TARGET $PERM"
 
 echo "== 1-2: first launch, expect the notification prompt"
 adb shell am start -W -n "$ACT" >/dev/null
@@ -98,5 +145,35 @@ no_crash "background check"
 adb shell run-as "$PKG" cat files/last-check >/dev/null 2>&1 || fail "background check did not complete"
 if adb shell run-as "$PKG" cat files/last-check-error >/dev/null 2>&1; then fail "background check reported an error"; fi
 echo "background check ok"
+
+echo "== 6: a permission grant shows up, and notifies"
+adb shell pm grant "$TARGET" "$PERM"
+adb shell input keyevent KEYCODE_HOME
+sleep 1
+adb shell am start -W -n "$ACT" >/dev/null
+sleep 6
+no_crash "after grant"
+find_text "$SHORT access granted to" || fail "grant of $SHORT to $TARGET not shown"
+grep -qF "($TARGET)" "$OUT/ui-$step.xml" || fail "package name not shown with the change"
+adb shell cmd jobscheduler run -f "$PKG" 4201
+sleep 8
+adb shell dumpsys notification --noredact | grep -q "pkg=$PKG" || fail "no notification posted for the grant"
+echo "grant shown and notified"
+
+echo "== 7: Reject, switch it off in Settings, Back: the warning must clear"
+find_text "Reject: turn off" || fail "Reject button not found"
+tap_text "$OUT/ui-$step.xml" "Reject: turn off"
+sleep 4
+adb shell dumpsys activity activities | grep -E "topResumedActivity" | head -1
+adb shell pm revoke "$TARGET" "$PERM"
+adb shell input keyevent KEYCODE_BACK
+sleep 6
+no_crash "after reject"
+adb shell dumpsys activity activities | grep -E "topResumedActivity" | grep -q "$PKG" \
+  || fail "Back from Settings did not return to Jay Squad Sec"
+scroll_top
+if find_text "$SHORT access granted to"; then fail "warning did not clear after the permission was switched off"; fi
+if adb shell dumpsys notification --noredact | grep -q "pkg=$PKG"; then fail "stale notification not removed"; fi
+echo "warning and notification cleared"
 
 echo "SMOKE PASS"
