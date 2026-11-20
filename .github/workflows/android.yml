@@ -1,9 +1,14 @@
 name: Android foundation
 
 on:
+  # Feature branches are built through their pull request only: building the
+  # same commit for both push and pull_request doubled the runs, and the push
+  # runs kept restoring a Gradle cache that had recorded a transient
+  # "artifact not found" from Maven Central.
   push:
     branches:
-      - "stage-2/**"
+      - develop
+      - main
     paths:
       - "android/**"
       - "bridge/**"
@@ -21,6 +26,10 @@ on:
       - "update/**"
       - "apply/**"
       - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   android:
