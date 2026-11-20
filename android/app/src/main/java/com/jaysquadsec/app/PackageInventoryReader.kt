@@ -61,12 +61,13 @@ class PackageInventoryReader(context: Context) {
         }
 
         val requested = info.requestedPermissions.orEmpty()
-        val flags = info.requestedPermissionsFlags.orEmpty()
+        // IntArray has no orEmpty(); a missing flag means "not granted".
+        val flags = info.requestedPermissionsFlags ?: IntArray(0)
         val permissions = requested.mapIndexed { index, name ->
+            val flag = flags.getOrNull(index) ?: 0
             PermissionObservation(
                 name = name,
-                granted = flags.getOrNull(index)
-                    ?.and(PackageInfo.REQUESTED_PERMISSION_GRANTED) == PackageInfo.REQUESTED_PERMISSION_GRANTED,
+                granted = (flag and PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0,
             )
         }
 
