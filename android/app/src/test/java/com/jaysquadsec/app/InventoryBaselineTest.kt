@@ -87,9 +87,10 @@ class InventoryBaselineTest {
         assertTrue(left.none { it.packageName == "com.a.app" })
         assertTrue(left.any { it is InventoryChange.SignerChanged && it.packageName == "com.b.app" })
         assertTrue(left.any { it is InventoryChange.AppRemoved && it.packageName == "com.gone.app" })
-        // Accepting a removal drops it from the baseline.
+        // Accepting a removal keeps a tombstone and stops reporting it.
         val dropped = InventoryDiff.acceptPackage(accepted, now, "com.gone.app")
-        assertTrue("com.gone.app" !in dropped)
+        assertTrue(dropped.getValue("com.gone.app").removed)
+        assertTrue(InventoryDiff.compare(dropped, now).none { it.packageName == "com.gone.app" })
     }
 
     @Test
@@ -164,5 +165,40 @@ class InventoryBaselineTest {
         assertEquals("Security alert", notificationTitle(listOf(InventoryChange.PermissionGranted("com.a.app", sms))))
         val two = listOf(InventoryChange.PermissionGranted("com.a.app", sms), InventoryChange.AppAdded("com.b.app", setOf(mic)))
         assertEquals("2 security alerts to review", notificationTitle(two))
+    }
+
+    @Test
+    fun anAppThatHidesAndReturnsWithAnotherKeyIsStillCaught() {
+        val before = map(fp("com.bank.app", keyA))
+        val hidden = InventoryDiff.acceptPackage(before, emptyMap(), "com.bank.app")
+        val back = map(fp("com.bank.app", keyB))
+        val changes = InventoryDiff.compare(hidden, back)
+        assertTrue(changes.first() is InventoryChange.SignerChanged)
+        assertTrue(changes.any { it is InventoryChange.AppAdded })
+        // Same key coming back is just a re-added app.
+        val same = InventoryDiff.compare(hidden, map(fp("com.bank.app", keyA)))
+        assertTrue(same.single() is InventoryChange.AppAdded)
+        // Accepting it clears the tombstone.
+        val accepted = InventoryDiff.acceptPackage(hidden, back, "com.bank.app")
+        assertTrue(!accepted.getValue("com.bank.app").removed)
+    }
+
+    @Test
+    fun tombstonesSurviveTheCodecAndAreValidated() {
+        val apps = listOf(fp("com.a.app", keyA), AppFingerprint("com.gone.app", keyB, emptySet(), removed = true))
+        val back = BaselineCodec.decode(BaselineCodec.encode(apps))!!
+        assertTrue(back.getValue("com.gone.app").removed)
+        // A tombstone without a signer, or with permissions, is malformed.
+        assertNull(BaselineCodec.decode("jss-inventory-baseline v1\n~com.gone.app\t\t\n"))
+        assertNull(BaselineCodec.decode("jss-inventory-baseline v1\n~com.gone.app\t$keyA\t$sms\n"))
+    }
+
+    @Test
+    fun labelCleaningCoversSpacesMarksAndFillers() {
+        assertEquals("a b", safeLabel("a" + "\u2003".repeat(30) + "b"))
+        assertEquals("a b", safeLabel("a\u00A0b"))
+        assertTrue(safeLabel("e" + "\u0301".repeat(38)).length <= 3)
+        assertEquals("caf\u00e9", safeLabel("caf\u00e9"))
+        assertEquals("(no name)", safeLabel("\u3164\u2800\u3164"))
     }
 }

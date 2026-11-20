@@ -48,6 +48,12 @@ data class AppFingerprint(
     /** Sorted, comma-joined SHA-256 digests; empty if unavailable. */
     val signers: String,
     val sensitiveGranted: Set<String>,
+    /**
+     * Tombstone: the app was removed or hid itself and the user accepted
+     * that. Its signer is kept, so if it comes back signed by another key
+     * that is still reported (and notified) as a signer change.
+     */
+    val removed: Boolean = false,
 ) {
     companion object {
         fun of(app: AppObservation) = AppFingerprint(
@@ -99,8 +105,13 @@ object InventoryDiff {
         val out = mutableListOf<InventoryChange>()
         for ((pkg, now) in current) {
             val before = baseline[pkg]
-            if (before == null) {
+            if (before == null || before.removed) {
                 out += InventoryChange.AppAdded(pkg, now.sensitiveGranted)
+                if (before != null && before.signers.isNotEmpty() && now.signers.isNotEmpty() &&
+                    before.signers != now.signers
+                ) {
+                    out += InventoryChange.SignerChanged(pkg, before.signers, now.signers)
+                }
                 continue
             }
             // An empty signer means "could not read", not "unsigned": never
@@ -115,7 +126,9 @@ object InventoryDiff {
                 out += InventoryChange.PermissionRevoked(pkg, it)
             }
         }
-        for (pkg in baseline.keys - current.keys) out += InventoryChange.AppRemoved(pkg)
+        for (pkg in baseline.keys - current.keys) {
+            if (baseline.getValue(pkg).removed.not()) out += InventoryChange.AppRemoved(pkg)
+        }
         return out.sortedWith(
             compareByDescending<InventoryChange> { it.severity }
                 .thenBy { it.packageName }
@@ -149,9 +162,17 @@ object InventoryDiff {
             val now = current[pkg]
             val before = baseline[pkg]
             out[pkg] = when {
-                now == null -> { out.remove(pkg); continue }
-                now.signers.isEmpty() && before != null -> now.copy(signers = before.signers)
-                else -> now
+                now == null -> {
+                    // Keep a tombstone with the known signer; nothing worth keeping otherwise.
+                    if (before != null && before.signers.isNotEmpty()) {
+                        before.copy(sensitiveGranted = emptySet(), removed = true)
+                    } else {
+                        out.remove(pkg)
+                        continue
+                    }
+                }
+                now.signers.isEmpty() && before != null -> now.copy(signers = before.signers, removed = false)
+                else -> now.copy(removed = false)
             }
         }
         return out
@@ -172,6 +193,7 @@ object InventoryDiff {
  *
  *   jss-inventory-baseline v1
  *   <package>\t<signers>\t<perm,perm,...>
+ *   ~<package>\t<signers>\t          (tombstone: accepted removal)
  */
 object BaselineCodec {
     private const val HEADER = "jss-inventory-baseline v1"
@@ -182,6 +204,7 @@ object BaselineCodec {
     fun encode(apps: Collection<AppFingerprint>): String = buildString {
         append(HEADER).append('\n')
         apps.sortedBy { it.packageName }.forEach { a ->
+            if (a.removed) append('~')
             append(a.packageName).append('\t')
                 .append(a.signers).append('\t')
                 .append(a.sensitiveGranted.sorted().joinToString(","))
@@ -197,11 +220,14 @@ object BaselineCodec {
         for (line in lines.drop(1)) {
             val f = line.split('\t')
             if (f.size != 3) return null
-            val (pkg, signers, perms) = f
+            val (field0, signers, perms) = f
+            val removed = field0.startsWith("~")
+            val pkg = field0.removePrefix("~")
             if (!PACKAGE.matches(pkg) || !SIGNERS.matches(signers) || pkg in out) return null
             val granted = if (perms.isEmpty()) emptySet() else perms.split(',').toSet()
             if (!SensitivePermissions.ALL.containsAll(granted)) return null
-            out[pkg] = AppFingerprint(pkg, signers, granted.toSortedSet())
+            if (removed && (signers.isEmpty() || granted.isNotEmpty())) return null
+            out[pkg] = AppFingerprint(pkg, signers, granted.toSortedSet(), removed)
         }
         return out
     }
