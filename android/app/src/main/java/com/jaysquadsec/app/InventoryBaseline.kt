@@ -229,8 +229,7 @@ private fun InventoryChange.rawKey(): String = when (this) {
  * Decides what to notify. Only changes not announced before are returned, and
  * the ledger keeps only keys of changes still present: once a change is
  * accepted or undone it is forgotten, so if it happens again it is announced
- * again. Revocations and removals are not notified (they reduce exposure);
- * they still appear in the app.
+ * again. See [notifiable] for what may interrupt the user.
  */
 object NotifyPolicy {
     /**
@@ -246,8 +245,17 @@ object NotifyPolicy {
         val ledger: Set<String>,
     )
 
-    private fun notifiable(c: InventoryChange) =
-        c !is InventoryChange.PermissionRevoked && c !is InventoryChange.AppRemoved
+    /**
+     * Notify ONLY when an app gains sensitive access or is swapped: a
+     * signing-certificate change, a newly granted sensitive permission, or a
+     * new app that already holds one. Plain new apps, removals and
+     * revocations are shown in the app but never interrupt the user.
+     */
+    fun notifiable(c: InventoryChange): Boolean = when (c) {
+        is InventoryChange.SignerChanged, is InventoryChange.PermissionGranted -> true
+        is InventoryChange.AppAdded -> c.sensitive.isNotEmpty()
+        is InventoryChange.AppRemoved, is InventoryChange.PermissionRevoked -> false
+    }
 
     fun decide(changes: List<InventoryChange>, ledger: Set<String>): Decision {
         val present = changes.map { it.key() }.toSet()

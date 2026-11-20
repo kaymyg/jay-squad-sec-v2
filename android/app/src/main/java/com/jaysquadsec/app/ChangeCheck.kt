@@ -133,7 +133,10 @@ class ChangeCheckJob : JobService() {
 }
 
 object Notifier {
-    private const val CHANNEL = "security-changes"
+    // Channel settings are fixed once created, so a behaviour change needs a
+    // new ID; the old channel is deleted.
+    private const val CHANNEL = "security-alerts"
+    private const val OLD_CHANNEL = "security-changes"
     private const val ID = 1
 
     /** Permission granted, notifications enabled for the app, and our channel not blocked. */
@@ -153,10 +156,23 @@ object Notifier {
     fun show(context: Context, title: String, text: String, lines: List<String>): Boolean {
         if (!canNotify(context)) return false
         val nm = context.getSystemService(NotificationManager::class.java) ?: return false
+        nm.deleteNotificationChannel(OLD_CHANNEL)
+        // HIGH: a small banner at the top for a few seconds, then it stays in
+        // the shade. Never full screen (no full-screen intent is used).
+        // Sound: the phone's default notification tone.
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Security changes", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                description = "New apps, changed signing certificates and new sensitive access"
+            NotificationChannel(CHANNEL, "Security alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "An app gained sensitive access (SMS, microphone, camera, location...) " +
+                    "or its signing certificate changed"
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                setSound(
+                    android.provider.Settings.System.DEFAULT_NOTIFICATION_URI,
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                )
+                enableVibration(true)
             },
         )
         // Explicit, immutable intent to our own activity: no other app can
@@ -184,6 +200,8 @@ object Notifier {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
             .setContentIntent(open)
+            .setCategory(Notification.CATEGORY_STATUS)
+            .setColor(0xFF1E88E5.toInt())
             .setAutoCancel(true)
             .build()
         return runCatching { nm.notify(ID, n) }.isSuccess
