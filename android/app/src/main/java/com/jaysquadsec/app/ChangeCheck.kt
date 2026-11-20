@@ -61,6 +61,7 @@ object ChangeCheck {
                     }.getOrDefault(emptySet())
                     val decision = NotifyPolicy.decide(changes, ledger)
                     var posted = false
+                    if (decision.unreviewed.isEmpty()) Notifier.cancel(context)
                     if (decision.toNotify.isNotEmpty()) {
                         // Show every unreviewed change, not only the new ones,
                         // so this post never hides an earlier unhandled alert.
@@ -165,6 +166,11 @@ object Notifier {
         if (!nm.areNotificationsEnabled()) return false
         val channel = nm.getNotificationChannel(CHANNEL)
         return channel == null || channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    /** Remove our alert once nothing is left to review. */
+    fun cancel(context: Context) {
+        runCatching { context.getSystemService(NotificationManager::class.java)?.cancel(ID) }
     }
 
     /** Returns true only if the notification was actually posted. */

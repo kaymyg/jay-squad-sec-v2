@@ -89,3 +89,26 @@ internal fun describe(change: InventoryChange, label: String?): String {
 /** Notifications only ever carry sensitive-access or swapped-app alerts. */
 internal fun notificationTitle(changes: List<InventoryChange>): String =
     if (changes.size == 1) "Security alert" else "${changes.size} security alerts to review"
+
+/**
+ * How to undo the changes for one app. Switching a permission off undoes a
+ * grant; a new app or a changed signing certificate is only undone by
+ * uninstalling (or accepted with Accept).
+ */
+internal fun rejectLabel(changes: List<InventoryChange>): String =
+    if (changes.any { it is InventoryChange.AppAdded || it is InventoryChange.SignerChanged }) {
+        "Reject: uninstall"
+    } else {
+        "Reject: turn off"
+    }
+
+internal fun rejectHint(changes: List<InventoryChange>): String = when {
+    changes.any { it is InventoryChange.SignerChanged } ->
+        "To reject, uninstall this app in its settings and reinstall it from a trusted store."
+    changes.any { it is InventoryChange.AppAdded } ->
+        "To reject, uninstall it in its settings. Switching its permissions off is not enough: " +
+            "a new app stays listed until it is removed or accepted."
+    changes.any { it is InventoryChange.PermissionGranted } ->
+        "To reject, switch the listed permission off in its settings. This clears when you come back."
+    else -> "Accept to clear."
+}
