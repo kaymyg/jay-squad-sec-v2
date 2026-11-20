@@ -24,21 +24,27 @@ class BaselineStore(private val dir: File) {
         return if (apps == null) Loaded.Corrupt else Loaded.Ok(apps, f.lastModified())
     }
 
-    fun save(apps: Collection<AppFingerprint>) {
+    /**
+     * The screen and the background check may both save; one process-wide
+     * lock and a unique temp file per write keep them from interleaving.
+     */
+    fun save(apps: Collection<AppFingerprint>) = synchronized(WRITE_LOCK) {
         dir.mkdirs()
-        val tmp = File(dir, "$FILE.tmp")
-        FileOutputStream(tmp).use { out ->
-            out.write(BaselineCodec.encode(apps).toByteArray(Charsets.UTF_8))
-            out.fd.sync()
-        }
-        if (!tmp.renameTo(file)) {
-            tmp.delete()
-            throw java.io.IOException("could not save inventory baseline")
+        val tmp = File.createTempFile("$FILE.", ".tmp", dir)
+        try {
+            FileOutputStream(tmp).use { out ->
+                out.write(BaselineCodec.encode(apps).toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(file)) throw java.io.IOException("could not save inventory baseline")
+        } finally {
+            if (tmp.exists()) tmp.delete()
         }
     }
 
     companion object {
         const val FILE = "inventory-baseline.v1"
+        val WRITE_LOCK = Any()
         private const val MAX_BYTES = 4L * 1024 * 1024
     }
 }

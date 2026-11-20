@@ -188,3 +188,46 @@ object BaselineCodec {
         return out
     }
 }
+
+/** Stable identity of a change, so each one is notified once. */
+fun InventoryChange.key(): String = when (this) {
+    is InventoryChange.AppAdded -> "added|$packageName"
+    is InventoryChange.AppRemoved -> "removed|$packageName"
+    is InventoryChange.SignerChanged -> "signer|$packageName|$after"
+    is InventoryChange.PermissionGranted -> "granted|$packageName|$permission"
+    is InventoryChange.PermissionRevoked -> "revoked|$packageName|$permission"
+}
+
+/**
+ * Decides what to notify. Only changes not announced before are returned, and
+ * the ledger keeps only keys of changes still present: once a change is
+ * accepted or undone it is forgotten, so if it happens again it is announced
+ * again. Revocations and removals are not notified (they reduce exposure);
+ * they still appear in the app.
+ */
+object NotifyPolicy {
+    data class Decision(val toNotify: List<InventoryChange>, val ledger: Set<String>)
+
+    fun decide(changes: List<InventoryChange>, ledger: Set<String>): Decision {
+        val present = changes.map { it.key() }.toSet()
+        val fresh = changes.filter {
+            it.key() !in ledger &&
+                it !is InventoryChange.PermissionRevoked &&
+                it !is InventoryChange.AppRemoved
+        }
+        return Decision(fresh, present)
+    }
+
+    private const val HEADER = "jss-notified v1"
+    private const val MAX_KEYS = 20_000
+
+    fun encode(ledger: Set<String>): String =
+        (listOf(HEADER) + ledger.sorted()).joinToString("\n", postfix = "\n")
+
+    /** Malformed input yields an empty ledger: worst case, a change is announced twice. */
+    fun decode(text: String): Set<String> {
+        val lines = text.split('\n').filter { it.isNotEmpty() }
+        if (lines.firstOrNull() != HEADER || lines.size > MAX_KEYS) return emptySet()
+        return lines.drop(1).filter { it.length < 512 && '\t' !in it }.toSet()
+    }
+}
