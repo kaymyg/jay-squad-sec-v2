@@ -218,4 +218,36 @@ class InventoryBaselineTest {
         // Unchanged inputs report nothing absorbed.
         assertEquals(0, InventoryDiff.absorbRevocations(absorbed, revoked).second)
     }
+
+    @Test
+    fun changesMapToEngineEventsOnlyWhenRiskRises() {
+        assertEquals(listOf("app_signer_changed"), EngineEvents.of(InventoryChange.SignerChanged("com.a", keyA, keyB)))
+        assertEquals(listOf("sensitive_permission_granted"), EngineEvents.of(InventoryChange.PermissionGranted("com.a", sms)))
+        assertEquals(
+            listOf("new_app_with_sensitive_access", "sensitive_permission_granted", "sensitive_permission_granted"),
+            EngineEvents.of(InventoryChange.AppAdded("com.a", setOf(sms, mic))),
+        )
+        assertTrue(EngineEvents.of(InventoryChange.AppAdded("com.a", emptySet())).isEmpty())
+        assertTrue(EngineEvents.of(InventoryChange.AppRemoved("com.a")).isEmpty())
+        assertTrue(EngineEvents.of(InventoryChange.PermissionRevoked("com.a", sms)).isEmpty())
+    }
+
+    @Test
+    fun engineIdentityIsBoundedAndSignerSpecific() {
+        val many = List(6) { "c".repeat(64) }.joinToString(",")
+        val id = EngineEvents.identity("com." + "a".repeat(250), many)
+        assertTrue(id.length < 512)
+        assertTrue(EngineEvents.identity("com.a", keyA) != EngineEvents.identity("com.a", keyB))
+        assertTrue(EngineEvents.identity("com.a", keyA).startsWith("com.a:sha256:"))
+    }
+
+    @Test
+    fun riskWordsMatchEngineActions() {
+        assertEquals(listOf("Low", "Watch", "High", "Very high", "Critical"), (0..4).map(RiskWords::of))
+        assertEquals("Critical", RiskWords.of(99))
+        val one = listOf(InventoryChange.PermissionGranted("com.evil.x", sms))
+        assertEquals("High risk: WhatsApp (com.evil.x)", notificationTitle(one, "WhatsApp\n", "com.evil.x"))
+        val two = one + InventoryChange.AppAdded("com.b", setOf(mic))
+        assertEquals("High risk: WhatsApp (com.evil.x) +1 more", notificationTitle(two, "WhatsApp", "com.evil.x"))
+    }
 }

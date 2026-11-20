@@ -16,14 +16,20 @@ has no code-injection surface.
   installed version.
 - **Detection cannot be switched off by an update, even a validly signed
   one.** On-device validation enforces semantic bounds, not just signs:
-  - threat indicators: weight in [1, 100] (none can be silenced);
+  - threat indicators: weight in [1, 100] (none can be silenced). This
+    includes the Android app-level kinds `app_signer_changed`,
+    `sensitive_permission_granted` and `new_app_with_sensitive_access`;
   - neutral high-volume events (file writes, network connects, process
     start/exit): [0, 5] (no risk laundering, no mass false positives);
   - good evidence (signed binary, stable tick): [-20, 0] (being signed cannot
     cancel an injection + credential-theft chain);
   - half-life in [10 s, 1 h];
   - 5 <= monitor < restrict < suspend < block <= 400, each step at least 5;
-  - reachability: the five strongest indicators must sum to at least block_at.
+  - reachability: the five strongest process indicators must sum to at least
+    block_at (150 under the defaults: 40 + 35 + 30 + 25 + 20). App-level
+    weights do not count, because app and process subjects never share kinds;
+  - the app signer-change weight must be at least restrict_at, so no patch
+    can make a swapped app look harmless.
 
   A property test runs a full attack chain through the engine under defaults
   and the most lenient configs validation accepts, and requires Block in every
@@ -62,12 +68,52 @@ It does not, on its own:
   previous verified patch (with a tamper warning); removing both reverts to
   compiled-in defaults. Every outcome is rules the builder actually signed,
   all passing validation. `MIN_RULES_VERSION` bounds how far back this can go
-  (raise it each release); platform storage protection (Android app-private
-  storage) and a hardware-backed high-water mark (Android Keystore, planned)
-  are the remaining controls;
+  (raise it each release; on Android, `JSS_ANDROID_MIN_RULES_VERSION`).
+  Platform storage protection (Android app-private storage) is the other
+  control. An Android Keystore high-water mark would not survive a data wipe
+  either, since Keystore keys are deleted with the app's data;
 - support two processes applying updates to one state directory at once
   (applies are serialized within a process only);
 - replace independent security testing.
+
+## Rules format v2
+
+The signed payload is a fixed 98-byte record: magic `JSSR` (4), format
+version (2), half-life (4), 18 weights (72), four thresholds (16). Version 2
+appended three Android app-level kinds to the weights table. Kinds are
+append-only and any change bumps the format version.
+
+| Kind (text key `weight.<kind>`) | Class | Default weight | Meaning |
+|---|---|---|---|
+| `app_signer_changed` | indicator | 60 | Same package, different signing certificate. Alone it reaches Restrict (50). |
+| `sensitive_permission_granted` | indicator | 15 each | An app newly holds a sensitive permission (SMS, microphone, location...). One alone stays Allow; two reach Monitor, four reach Restrict. |
+| `new_app_with_sensitive_access` | indicator | 10 | A newly seen app that already holds such access. The app also sends one grant event per permission held, so SMS plus microphone scores 40 (Monitor). |
+
+Under the defaults (Monitor 25, Restrict 50, Suspend 75, Block 100) a swapped
+app that also gains one sensitive permission scores 75 (Suspend). These
+levels are the engine's verdict only; the Android app is alert-only and shows
+them as risk wording, it does not block anything.
+
+What changed for builders:
+
+- **v1 payloads are rejected.** A payload must be exactly 98 bytes with
+  format version 2. A v1 payload (86 bytes) has no weights for the new kinds;
+  none was ever released. Recompile and re-sign any rules made with older
+  tools.
+- **Rules text files need the new keys.** `jaysec-rules export-defaults` now
+  writes `weight.app_signer_changed`, `weight.sensitive_permission_granted`
+  and `weight.new_app_with_sensitive_access`. `jaysec-rules compile` requires
+  every key, so an older text file fails with `missing keys: ...` until they
+  are added.
+- **The new kinds are indicators,** so their weights must be in [1, 100] and
+  cannot be set to 0. `app_signer_changed` must also be at least
+  `restrict_at`: raising thresholds means raising it too. App-level weights
+  are excluded from the reachability check, which stays 150 under the
+  defaults.
+- **App verdicts are deterministic.** An app's score is the sum of the weights
+  of its unreviewed app-level observations, with no time decay, so the same
+  changes always give the same verdict (exact threshold sums such as
+  60 + 15 = 75 stay exactly Suspend).
 
 ## Builder workflow (offline machine)
 
@@ -94,6 +140,12 @@ jaysec-sign --key signing.key --product jay-squad-sec-agent \
 jaysec-verify --pub signing.pub --product jay-squad-sec-agent --current 0 --patch rules-v1.jssp
 jaysec-rules show rules-v1.jssp
 ```
+
+For the Android app use product ID `jay-squad-sec-android` in `jaysec-sign`
+and `jaysec-verify`; a patch signed for `jay-squad-sec-agent` is rejected
+there. The Android bridge embeds its public key at build time
+(`JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX`, see `bridge/README.md`). The Android
+app does not load signed rules yet; its verdicts use the built-in defaults.
 
 ## Device side (desktop agent)
 

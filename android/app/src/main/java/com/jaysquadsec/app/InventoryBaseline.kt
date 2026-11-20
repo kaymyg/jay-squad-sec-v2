@@ -338,3 +338,42 @@ object NotifyPolicy {
         return lines.drop(1).filter { hex.matches(it) }.toSet()
     }
 }
+
+/**
+ * How inventory changes become engine observations. Pure, unit-tested; the
+ * engine itself runs in [EngineVerdicts].
+ */
+object EngineEvents {
+    const val SIGNER_CHANGED = "app_signer_changed"
+    const val SENSITIVE_GRANTED = "sensitive_permission_granted"
+    const val NEW_APP_SENSITIVE = "new_app_with_sensitive_access"
+
+    /** Engine event kinds for one change; empty for changes that lower risk. */
+    fun of(change: InventoryChange): List<String> = when (change) {
+        is InventoryChange.SignerChanged -> listOf(SIGNER_CHANGED)
+        is InventoryChange.PermissionGranted -> listOf(SENSITIVE_GRANTED)
+        is InventoryChange.AppAdded ->
+            if (change.sensitive.isEmpty()) emptyList()
+            else listOf(NEW_APP_SENSITIVE) + change.sensitive.map { SENSITIVE_GRANTED }
+        is InventoryChange.AppRemoved, is InventoryChange.PermissionRevoked -> emptyList()
+    }
+
+    /**
+     * Canonical package identity for the engine: package plus a SHA-256 of
+     * its signer set, so identity has a fixed, bounded size however many
+     * signers an app has.
+     */
+    fun identity(packageName: String, signers: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(signers.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return "$packageName:sha256:$digest"
+    }
+}
+
+/** User-facing words for the engine's policy actions (alert-only: nothing is enforced). */
+object RiskWords {
+    /** Index matches the engine's action ordinal: 0 Allow .. 4 Block. */
+    private val WORDS = listOf("Low", "Watch", "High", "Very high", "Critical")
+    fun of(actionOrdinal: Int): String = WORDS.getOrElse(actionOrdinal) { "Critical" }
+}
