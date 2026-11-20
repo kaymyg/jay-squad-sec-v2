@@ -132,10 +132,28 @@ object InventoryDiff {
         baseline: Map<String, AppFingerprint>,
         current: Map<String, AppFingerprint>,
         packageName: String,
+    ): Map<String, AppFingerprint> = acceptPackages(baseline, current, setOf(packageName))
+
+    /**
+     * Accept the listed packages only. A signer that could not be read in
+     * this scan never overwrites the known one: otherwise accepting would
+     * silently disable signer-change detection for that app.
+     */
+    fun acceptPackages(
+        baseline: Map<String, AppFingerprint>,
+        current: Map<String, AppFingerprint>,
+        packageNames: Set<String>,
     ): Map<String, AppFingerprint> {
         val out = LinkedHashMap(baseline)
-        val now = current[packageName]
-        if (now == null) out.remove(packageName) else out[packageName] = now
+        for (pkg in packageNames) {
+            val now = current[pkg]
+            val before = baseline[pkg]
+            out[pkg] = when {
+                now == null -> { out.remove(pkg); continue }
+                now.signers.isEmpty() && before != null -> now.copy(signers = before.signers)
+                else -> now
+            }
+        }
         return out
     }
 
@@ -189,8 +207,17 @@ object BaselineCodec {
     }
 }
 
-/** Stable identity of a change, so each one is notified once. */
-fun InventoryChange.key(): String = when (this) {
+/**
+ * Stable identity of a change, so each one is notified once. Stored as a
+ * SHA-256 hex digest: fixed length whatever the package name or signer list.
+ */
+fun InventoryChange.key(): String {
+    val raw = rawKey()
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it) }
+}
+
+private fun InventoryChange.rawKey(): String = when (this) {
     is InventoryChange.AppAdded -> "added|$packageName"
     is InventoryChange.AppRemoved -> "removed|$packageName"
     is InventoryChange.SignerChanged -> "signer|$packageName|$after"
@@ -206,19 +233,39 @@ fun InventoryChange.key(): String = when (this) {
  * they still appear in the app.
  */
 object NotifyPolicy {
-    data class Decision(val toNotify: List<InventoryChange>, val ledger: Set<String>)
+    /**
+     * @property toNotify changes never announced before (non-empty means post).
+     * @property unreviewed every notifiable change still present, highest
+     *   severity first: what the notification shows, so a new post never
+     *   hides an earlier, still-unhandled alert.
+     * @property ledger keys of every change still present.
+     */
+    data class Decision(
+        val toNotify: List<InventoryChange>,
+        val unreviewed: List<InventoryChange>,
+        val ledger: Set<String>,
+    )
+
+    private fun notifiable(c: InventoryChange) =
+        c !is InventoryChange.PermissionRevoked && c !is InventoryChange.AppRemoved
 
     fun decide(changes: List<InventoryChange>, ledger: Set<String>): Decision {
         val present = changes.map { it.key() }.toSet()
-        val fresh = changes.filter {
-            it.key() !in ledger &&
-                it !is InventoryChange.PermissionRevoked &&
-                it !is InventoryChange.AppRemoved
-        }
-        return Decision(fresh, present)
+        val unreviewed = changes.filter(::notifiable).sortedByDescending { it.severity }
+        val fresh = unreviewed.filter { it.key() !in ledger }
+        return Decision(fresh, unreviewed, present)
     }
 
-    private const val HEADER = "jss-notified v1"
+    /**
+     * Ledger to save after a check. A change counts as announced only if the
+     * notification was actually posted; otherwise (notifications off, channel
+     * blocked, post failed) the old entries are kept but pruned, so the change
+     * is announced once notifications work again.
+     */
+    fun ledgerAfter(decision: Decision, old: Set<String>, posted: Boolean): Set<String> =
+        if (decision.toNotify.isEmpty() || posted) decision.ledger else old.intersect(decision.ledger)
+
+    private const val HEADER = "jss-notified v2"
     private const val MAX_KEYS = 20_000
 
     fun encode(ledger: Set<String>): String =
@@ -228,6 +275,7 @@ object NotifyPolicy {
     fun decode(text: String): Set<String> {
         val lines = text.split('\n').filter { it.isNotEmpty() }
         if (lines.firstOrNull() != HEADER || lines.size > MAX_KEYS) return emptySet()
-        return lines.drop(1).filter { it.length < 512 && '\t' !in it }.toSet()
+        val hex = Regex("^[0-9a-f]{64}$")
+        return lines.drop(1).filter { hex.matches(it) }.toSet()
     }
 }

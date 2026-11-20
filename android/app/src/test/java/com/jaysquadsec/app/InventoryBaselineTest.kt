@@ -123,4 +123,46 @@ class InventoryBaselineTest {
         tmp.root.resolve(BaselineStore.FILE).writeText("garbage")
         assertTrue(store.load() is BaselineStore.Loaded.Corrupt)
     }
+
+    @Test
+    fun acceptNeverReplacesAKnownSignerWithAnUnreadableOne() {
+        val before = map(fp("com.a.app", keyA))
+        val unreadable = map(fp("com.a.app", "", sms))
+        val accepted = InventoryDiff.acceptPackage(before, unreadable, "com.a.app")
+        assertEquals(keyA, accepted.getValue("com.a.app").signers)
+        assertEquals(setOf(sms), accepted.getValue("com.a.app").sensitiveGranted)
+        // A later reinstall with another key is still detected.
+        val reinstalled = map(fp("com.a.app", keyB, sms))
+        assertTrue(InventoryDiff.compare(accepted, reinstalled).single() is InventoryChange.SignerChanged)
+    }
+
+    @Test
+    fun acceptPackagesTouchesOnlyTheListedApps() {
+        val before = map(fp("com.a.app"), fp("com.b.app"), fp("com.c.app"))
+        val now = map(fp("com.a.app", keyA, sms), fp("com.b.app", keyA, mic), fp("com.c.app", keyB))
+        val accepted = InventoryDiff.acceptPackages(before, now, setOf("com.a.app", "com.b.app"))
+        val left = InventoryDiff.compare(accepted, now)
+        assertEquals(listOf("com.c.app"), left.map { it.packageName })
+    }
+
+    @Test
+    fun hostileLabelsCannotForgeOrHideWarnings() {
+        val bidi = "\u202Eppa.lieve\u202C"
+        assertEquals("Notes No changes.", safeLabel("Notes\nNo changes."))
+        assertTrue(safeLabel(bidi).none { it == '\u202E' || it == '\u202C' })
+        assertTrue(safeLabel("x".repeat(500)).length <= 40)
+        assertEquals("(no name)", safeLabel("\n\t\u200B"))
+        val line = describe(InventoryChange.PermissionGranted("com.evil.x", sms), "Chrome\n" + "y".repeat(300))
+        assertTrue("warning comes first", line.startsWith("READ_SMS access granted to "))
+        assertTrue("package always shown", line.endsWith("(com.evil.x)"))
+        assertTrue(line.length < 120)
+        assertTrue('\n' !in line)
+    }
+
+    @Test
+    fun notificationTitleDoesNotOverstateAPlainNewApp() {
+        assertEquals("New app installed", notificationTitle(listOf(InventoryChange.AppAdded("com.a.app", emptySet()))))
+        assertEquals("Security alert", notificationTitle(listOf(InventoryChange.AppAdded("com.a.app", setOf(sms)))))
+        assertEquals("Security alert", notificationTitle(listOf(InventoryChange.PermissionGranted("com.a.app", sms))))
+    }
 }
