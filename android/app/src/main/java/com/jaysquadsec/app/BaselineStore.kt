@@ -11,7 +11,7 @@ class BaselineStore(private val dir: File) {
     sealed class Loaded {
         object Missing : Loaded()
         object Corrupt : Loaded()
-        class Ok(val apps: Map<String, AppFingerprint>) : Loaded()
+        class Ok(val apps: Map<String, AppFingerprint>, val recordedAtMs: Long) : Loaded()
     }
 
     private val file get() = File(dir, FILE)
@@ -21,7 +21,7 @@ class BaselineStore(private val dir: File) {
         if (!f.exists()) return Loaded.Missing
         if (!f.isFile || f.length() > MAX_BYTES) return Loaded.Corrupt
         val apps = runCatching { BaselineCodec.decode(f.readText(Charsets.UTF_8)) }.getOrNull()
-        return if (apps == null) Loaded.Corrupt else Loaded.Ok(apps)
+        return if (apps == null) Loaded.Corrupt else Loaded.Ok(apps, f.lastModified())
     }
 
     fun save(apps: Collection<AppFingerprint>) {

@@ -103,6 +103,7 @@ class InventoryBaselineTest {
         val apps = listOf(fp("com.a.app", keyA, sms))
         store.save(apps)
         val loaded = store.load() as BaselineStore.Loaded.Ok
+        assertTrue(loaded.recordedAtMs > 0)
         assertEquals(apps.associateBy { it.packageName }, loaded.apps)
         assertTrue(!tmp.root.resolve("${BaselineStore.FILE}.tmp").exists())
         tmp.root.resolve(BaselineStore.FILE).writeText("garbage")
