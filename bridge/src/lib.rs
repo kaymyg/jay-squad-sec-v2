@@ -49,9 +49,11 @@ pub mod jni;
 use jay_squad_sec::engine::Engine;
 use jay_squad_sec::event::{Event, EventKind};
 use jay_squad_sec::rtid::Rtid;
+use jay_squad_sec_apply::{UpdateStore, MAX_PATCH_FILE_BYTES};
 use jay_squad_sec_protocol::{validate, WireEvent, MAX_DETAIL_LEN, PROTOCOL_VERSION};
 use std::collections::{BTreeMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -78,6 +80,10 @@ pub const ERR_BAD_HANDLE: i32 = 7;
 pub const ERR_BUFFER_TOO_SMALL: i32 = 8;
 /// The generation is not newer than one already retired for this PID.
 pub const ERR_STALE_GENERATION: i32 = 9;
+/// No builder public key was embedded in this product build.
+pub const ERR_UPDATE_NOT_CONFIGURED: i32 = 10;
+/// A signed rules patch failed verification, policy validation or installation.
+pub const ERR_UPDATE_REJECTED: i32 = 11;
 
 /// Maximum simultaneously live engines per process.
 pub const MAX_ENGINES: usize = 8;
@@ -95,7 +101,8 @@ pub const MIN_ALERT_BUFFER: usize = MAX_ALERT_LINE + 1;
 pub const MAX_KIND_LEN: usize = 64;
 pub const MAX_IDENTITY_LEN: usize = 512;
 /// Current ABI version. Bump on any incompatible change.
-pub const ABI_VERSION: u32 = 3;
+/// v4: signed rules load/apply entry points and codes 10/11.
+pub const ABI_VERSION: u32 = 4;
 
 struct Identity {
     rtid: Rtid,
@@ -116,6 +123,14 @@ struct EngineState {
     retired_order: VecDeque<u32>,
     alerts: VecDeque<String>,
     alerts_dropped: u64,
+    /// Version of the rules active in this engine (0 = compiled-in defaults).
+    /// Activation never goes below it, so a stale directory cannot downgrade
+    /// a running engine.
+    rules_version: u64,
+    /// Storage directory this engine's rules are bound to. The first update
+    /// call fixes it; any other directory is refused, so anti-rollback cannot
+    /// be reset by pointing the engine at a fresh directory.
+    rules_dir: Option<PathBuf>,
 }
 
 impl EngineState {
@@ -262,6 +277,8 @@ pub fn engine_new(boot_nonce: u64) -> JssHandle {
                 retired_order: VecDeque::new(),
                 alerts: VecDeque::new(),
                 alerts_dropped: 0,
+                rules_version: 0,
+                rules_dir: None,
             }),
         };
         reg.live.insert(id, Arc::new(inst));
@@ -444,6 +461,168 @@ pub fn note_undelivered(handle: JssHandle, lines: u64) {
         st.alerts_dropped = st.alerts_dropped.saturating_add(lines);
         Ok(())
     });
+}
+
+// ---------------------------------------------------------------------------
+// Signed rules updates (data only; no dynamic code loading).
+// ---------------------------------------------------------------------------
+
+/// Android has a distinct product identity: desktop-agent patches cannot be
+/// replayed into the consumer app. Set the matching product ID when signing.
+pub const ANDROID_PRODUCT_ID: &str = "jay-squad-sec-android";
+/// Maximum app-private storage path length accepted for rules state.
+pub const MAX_STORAGE_PATH_LEN: usize = 4096;
+
+/// The builder public key is a **build-time** input, never supplied by Kotlin
+/// or JNI, so a compromised caller cannot substitute its own key.
+///
+/// - `JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX`: exactly 64 hex characters.
+/// - `JSS_ANDROID_MIN_RULES_VERSION`: required whenever a key is embedded
+///   (set it deliberately, even to 0); raise it each release.
+///
+/// Cargo tracks both variables (`env-dep`), so changing either rebuilds the
+/// library; a stale key cannot survive into a later build. Any missing or
+/// malformed setting makes every update operation fail closed.
+fn android_update_store(dir: &str) -> Result<UpdateStore, i32> {
+    let encoded =
+        option_env!("JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX").ok_or(ERR_UPDATE_NOT_CONFIGURED)?;
+    let public_key = decode_public_key(encoded).ok_or(ERR_UPDATE_NOT_CONFIGURED)?;
+    let min_version = option_env!("JSS_ANDROID_MIN_RULES_VERSION")
+        .ok_or(ERR_UPDATE_NOT_CONFIGURED)?
+        .parse::<u64>()
+        .map_err(|_| ERR_UPDATE_NOT_CONFIGURED)?;
+    // State must live at a fixed, absolute app-private location; a relative
+    // path would silently depend on the process working directory.
+    if !std::path::Path::new(dir).is_absolute() {
+        return Err(ERR_INVALID);
+    }
+    Ok(
+        UpdateStore::new(PathBuf::from(dir), public_key, ANDROID_PRODUCT_ID)
+            .with_min_version(min_version),
+    )
+}
+
+fn decode_public_key(encoded: &str) -> Option<[u8; 32]> {
+    let bytes = encoded.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (i, out) in key.iter_mut().enumerate() {
+        let hi = (bytes[i * 2] as char).to_digit(16)? as u8;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)? as u8;
+        *out = (hi << 4) | lo;
+    }
+    Some(key)
+}
+
+/// Bind the engine to one storage directory: the first call fixes it, and a
+/// different directory afterwards is refused with [`ERR_INVALID`].
+fn bind_rules_dir(state: &mut EngineState, dir: &str) -> Result<(), i32> {
+    let dir = PathBuf::from(dir);
+    match &state.rules_dir {
+        Some(bound) if *bound != dir => {
+            state.push_alert(
+                "[update] refused: rules storage directory differs from the one this engine is bound to"
+                    .to_string(),
+            );
+            Err(ERR_INVALID)
+        }
+        Some(_) => Ok(()),
+        None => {
+            state.rules_dir = Some(dir);
+            Ok(())
+        }
+    }
+}
+
+/// Load the highest verified Android rules patch from app-private storage.
+/// The embedded builder key and product ID are fixed by this native build.
+pub fn load_signed_rules(handle: JssHandle, storage_dir: &[u8]) -> Result<u64, i32> {
+    guarded(|| {
+        let dir = checked_text(storage_dir, MAX_STORAGE_PATH_LEN, false)?;
+        let store = android_update_store(&dir)?;
+        let inst = lookup(handle)?;
+        let mut state = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        bind_rules_dir(&mut state, &dir)?;
+        let installed = store.load();
+        if installed.source == jay_squad_sec_apply::StateSource::Default
+            && store.state_files_present()
+        {
+            state.push_alert(
+                "[update] stored rules failed verification (tampered, corrupt or below minimum); \
+                 not using them"
+                    .to_string(),
+            );
+        }
+        let active = state.rules_version;
+        if installed.version < active {
+            state.push_alert(format!(
+                "[update] refused to downgrade active rules v{active} to stored v{}",
+                installed.version
+            ));
+            return Err(ERR_UPDATE_REJECTED);
+        }
+        state
+            .engine
+            .set_rules(installed.rules)
+            .map_err(|_| ERR_UPDATE_REJECTED)?;
+        state.rules_version = installed.version;
+        if installed.source != jay_squad_sec_apply::StateSource::Current && installed.version > 0 {
+            state.push_alert(format!(
+                "[update] Android rules recovered from previous verified state, version {}",
+                installed.version
+            ));
+        }
+        Ok(installed.version)
+    })
+}
+
+/// Verify, validate and atomically install a signed data-only rules patch,
+/// then activate those rules in this engine. Caller supplies only bytes and
+/// app-private storage path; the builder public key is not caller-selectable.
+pub fn apply_signed_rules(
+    handle: JssHandle,
+    storage_dir: &[u8],
+    patch_bytes: &[u8],
+) -> Result<u64, i32> {
+    guarded(|| {
+        if patch_bytes.len() > MAX_PATCH_FILE_BYTES as usize {
+            return Err(ERR_INVALID);
+        }
+        let dir = checked_text(storage_dir, MAX_STORAGE_PATH_LEN, false)?;
+        let store = android_update_store(&dir)?;
+        let inst = lookup(handle)?;
+        let mut state = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        bind_rules_dir(&mut state, &dir)?;
+        let installed = match store.apply_patch_bytes(patch_bytes) {
+            Ok(value) => value,
+            Err(e) => {
+                // The reason (bad signature, rollback, invalid rules...) helps
+                // the user and leaks nothing secret.
+                state.push_alert(format!(
+                    "[update] Android rules patch rejected ({e}); active rules unchanged"
+                ));
+                return Err(ERR_UPDATE_REJECTED);
+            }
+        };
+        // apply_patch_bytes has already decoded and validated the exact RulesConfig,
+        // so this cannot fail today; if it ever did, the disk holds the new
+        // version while the engine keeps its old rules, and we say so.
+        if state.engine.set_rules(installed.rules).is_err() {
+            state.push_alert(format!(
+                "[update] rules v{} installed but could not be activated; restart to retry",
+                installed.version
+            ));
+            return Err(ERR_UPDATE_REJECTED);
+        }
+        state.rules_version = installed.version;
+        state.push_alert(format!(
+            "[update] Android rules v{} verified, installed and activated",
+            installed.version
+        ));
+        Ok(installed.version)
+    })
 }
 
 // ---------------------------------------------------------------------------

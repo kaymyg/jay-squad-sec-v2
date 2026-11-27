@@ -1,4 +1,4 @@
-# Android bridge (ABI v3)
+# Android bridge (ABI v4)
 
 The boundary between the Android app and the Rust security engine. It has
 two front doors over one implementation:
@@ -108,6 +108,60 @@ same JNI ABI.
 
 Each review regression test was checked to fail when its bug is put back.
 
+## Signed rules updates
+
+The JNI API exposes `loadRules(appPrivateDir)` and
+`applyRules(appPrivateDir, signedPatchBytes)`. The app supplies only the
+app-private storage directory and patch bytes. It cannot supply or override
+the builder public key or product identity.
+
+The Android product identity is fixed to
+`jay-squad-sec-android`. The native bridge embeds its builder public key at
+compile time through `JSS_ANDROID_BUILDER_PUBLIC_KEY_HEX` (exactly 64 hex
+characters). If the key is missing or malformed, both update operations fail
+closed with `ERR_UPDATE_NOT_CONFIGURED`. `JSS_ANDROID_MIN_RULES_VERSION`
+is required whenever a key is embedded: a build with a key but no explicit
+minimum version also fails closed, so a release cannot ship with an
+accidental floor of 0. Set it to the lowest rules version that release will
+accept. The storage directory must be an absolute path (use
+`Context.getFilesDir()`); a relative path returns `ERR_INVALID`.
+
+Rejections return `ERR_UPDATE_REJECTED` and queue an alert naming the reason
+(bad signature, wrong product, rollback, below minimum, unsafe rules).
+
+Each engine is bound to the first storage directory it is given; any other
+directory is refused with `ERR_INVALID`, so anti-rollback cannot be reset by
+pointing the engine at an empty directory. A load never activates rules older
+than those already active in the engine. Patch versions above `u32::MAX` are
+refused even when signed. If state files exist but none verify, the engine
+falls back to the built-in defaults and raises a tampering alert instead of
+behaving like a fresh install.
+
+Known limit: the high-water mark lives in the engine, not in tamper-proof
+storage. A brand-new engine (for example after the app's data is wiped) trusts
+whatever verified state is on disk, bounded below only by
+`JSS_ANDROID_MIN_RULES_VERSION`. Raise that each release; a Keystore-backed
+high-water mark is planned. Several engines sharing one directory each keep
+their own active rules until they reload; the app should run one engine.
+
+The update payload is decoded as `RulesConfig` and fully validated by the
+core before installation and again before activation. The patch container is
+Ed25519-verified for the Android product ID, checked against the installed
+version and minimum version, then persisted atomically by `apply`. No dynamic
+library, executable, script, bytecode or arbitrary code is accepted. Rejected
+patches leave the active rules unchanged and produce an alert.
+
+Testing: `tests/signed_updates_configured.rs` builds the bridge with a
+published TEST-ONLY key (seed `[0x4a; 32]`) and checks that a genuine patch
+installs, activates and survives a restart, and that forged, wrong-product,
+rollback and detection-disabling patches are refused. CI sets
+`JSS_EXPECT_CONFIGURED_TESTS=1` so these fail instead of skipping if the key
+is not embedded. Never embed the test key in a release build.
+
+Builder workflow: sign rules with product ID `jay-squad-sec-android`, not
+`jay-squad-sec-agent`. Keep the signing private key offline. Embed only the
+matching public key in the Android native release build.
+
 ## Not done yet
 
 - Cross-compile with the Android NDK (arm64-v8a, armeabi-v7a, x86_64) and run
@@ -116,8 +170,6 @@ Each review regression test was checked to fail when its bug is put back.
 - Compile `JaySquadSecEngine.kt` in the Android project. No `kotlinc` was
   available here; the JNI methods it wraps are tested from Java.
 - Return structured decisions and incident IDs instead of alert text.
-- Load verified rule updates through the bridge (the `apply` crate exists;
-  it isn't wired into the bridge yet).
 - Fuzz the C ABI and get an independent review of the unsafe code.
 - Keep alert-only as the default. Do not enable Android process killing or
   arbitrary permission revocation, which ordinary apps cannot do.

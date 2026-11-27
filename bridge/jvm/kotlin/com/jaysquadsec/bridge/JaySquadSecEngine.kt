@@ -51,6 +51,39 @@ class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
         throwIfError(code)
     }
 
+    /**
+     * Load the highest verified rules version already installed in app-private
+     * storage. The path must be an app-private directory. The builder public
+     * key and Android product ID are fixed in the native build.
+     */
+    fun loadRules(storageDir: String): Long {
+        val h = liveHandle()
+        return updateResult(NativeBridge.nativeLoadRules(h, storageDir.utf8()))
+    }
+
+    /**
+     * Verify, install and activate a builder-signed, data-only rules patch.
+     * No executable code is accepted by this API.
+     */
+    fun applyRules(storageDir: String, signedPatch: ByteArray): Long {
+        val h = liveHandle()
+        return updateResult(NativeBridge.nativeApplyRules(h, storageDir.utf8(), signedPatch))
+    }
+
+    private fun updateResult(result: Long): Long {
+        if (result >= 0L) return result
+        when (-result) {
+            NativeBridge.ERR_BAD_HANDLE.toLong() -> throw EngineClosedException()
+            NativeBridge.ERR_UPDATE_NOT_CONFIGURED.toLong() ->
+                throw IllegalStateException("builder public key is not configured in this native build")
+            NativeBridge.ERR_UPDATE_REJECTED.toLong() ->
+                throw SecurityException("signed rules update rejected; see takeAlerts() for the reason")
+            NativeBridge.ERR_INVALID.toLong() ->
+                throw IllegalArgumentException("invalid update input")
+            else -> throw IllegalStateException("rules update failed with code $result")
+        }
+    }
+
     /** Remove and return queued alert lines, oldest first (empty if none). */
     fun takeAlerts(maxBytes: Int = DEFAULT_ALERT_BYTES): List<String> {
         val h = liveHandle()

@@ -17,3 +17,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 jay-squad-sec-core = { path = "../core" }
 jay-squad-sec-protocol = { path = "../protocol" }
+jay-squad-sec-apply = { path = "../apply" }
+
+# Test-only: sign fixture patches with a fixed TEST key (see
+# tests/signed_updates_configured.rs). Never part of the shipped library.
+[dev-dependencies]
+# Deterministic signing only (no RNG, no new packages: already in the tree).
+ed25519-compact = { version = "=2.1.1", default-features = false, features = ["std"] }
+jay-squad-sec-update = { path = "../update" }  # verify-only; no signing feature
