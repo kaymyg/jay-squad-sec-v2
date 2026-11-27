@@ -30,6 +30,8 @@ fn lenient_variants() -> Vec<RulesConfig> {
     // Block threshold raised to the maximum the defaults can still reach.
     let mut r = DEFAULT_RULES;
     r.block_at = 150.0; r.suspend_at = 120.0; r.restrict_at = 80.0; r.monitor_at = 40.0;
+    // A swapped app must still reach restrict_at on its own (validate rule).
+    r.weights[kind_index(AppSignerChanged)] = 80.0;
     v.push(r);
     // Good evidence at its most negative, shortest and longest half-life.
     for hl in [MIN_HALF_LIFE_MS, MAX_HALF_LIFE_MS] {

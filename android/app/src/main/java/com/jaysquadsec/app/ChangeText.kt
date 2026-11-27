@@ -87,8 +87,23 @@ internal fun describe(change: InventoryChange, label: String?): String {
 }
 
 /** Notifications only ever carry sensitive-access or swapped-app alerts. */
-internal fun notificationTitle(changes: List<InventoryChange>): String =
-    if (changes.size == 1) "Security alert" else "${changes.size} security alerts to review"
+internal fun notificationTitle(
+    changes: List<InventoryChange>,
+    highRiskLabel: String? = null,
+    highRiskPackage: String? = null,
+): String {
+    val apps = changes.map { it.packageName }.distinct().size
+    return when {
+        // The engine rated an app High or above: lead with that app, always
+        // with its package name (a label alone can impersonate another app).
+        highRiskPackage != null -> {
+            val more = if (apps > 1) " +${apps - 1} more" else ""
+            "High risk: ${safeLabel(highRiskLabel, 30)} ($highRiskPackage)$more"
+        }
+        changes.size == 1 -> "Security alert"
+        else -> "${changes.size} security alerts to review"
+    }
+}
 
 /**
  * How to undo the changes for one app. Switching a permission off undoes a

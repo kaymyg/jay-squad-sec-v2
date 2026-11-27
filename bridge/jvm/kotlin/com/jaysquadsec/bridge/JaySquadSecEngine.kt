@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * App-facing handle to one alert-only Jay Squad Sec engine (bridge ABI v4).
+ * App-facing handle to one alert-only Jay Squad Sec engine (bridge ABI v5).
  *
  * Ownership contract, enforced on both sides:
  * - The native handle is an opaque registry ID, never a pointer. Even if this
@@ -49,6 +49,29 @@ class JaySquadSecEngine private constructor(handle: Long) : AutoCloseable {
             h, pid, generation, packageIdentity.utf8(), kind.utf8(), detail.utf8(), atMs,
         )
         throwIfError(code)
+    }
+
+    /**
+     * Submit an app-level observation about an installed app (no process).
+     * @param kind one of app_signer_changed, sensitive_permission_granted,
+     *   new_app_with_sensitive_access.
+     */
+    fun submitAppEvent(packageIdentity: String, kind: String, detail: String) {
+        val h = liveHandle()
+        throwIfError(NativeBridge.nativeSubmitAppEvent(h, packageIdentity.utf8(), kind.utf8(), detail.utf8()))
+    }
+
+    /** The engine's structured verdict for an app subject. */
+    data class Assessment(val action: Action, val score: Double)
+
+    enum class Action { ALLOW, MONITOR, RESTRICT, SUSPEND, BLOCK }
+
+    fun appAssessment(packageIdentity: String): Assessment {
+        val h = liveHandle()
+        val r = NativeBridge.nativeAppAssessment(h, packageIdentity.utf8())
+        if (r < 0) throwIfError((-r).toInt())
+        val action = Action.entries.getOrElse((r ushr 32).toInt()) { Action.BLOCK }
+        return Assessment(action, (r and 0xFFFFFFFFL) / 1000.0)
     }
 
     /**

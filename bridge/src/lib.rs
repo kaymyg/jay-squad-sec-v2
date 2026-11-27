@@ -89,6 +89,10 @@ pub const ERR_UPDATE_REJECTED: i32 = 11;
 pub const MAX_ENGINES: usize = 8;
 /// Maximum live process identities tracked per engine.
 pub const MAX_IDENTITIES: usize = 4096;
+/// Maximum app-level subjects (installed apps with observations) per engine.
+pub const MAX_APP_SUBJECTS: usize = 4096;
+/// Maximum app-level observations remembered per app subject.
+pub const MAX_APP_EVENTS: usize = 256;
 /// Maximum PIDs whose highest retired generation is remembered per engine
 /// (oldest forgotten first). Bounds memory against a huge PID space.
 pub const MAX_RETIRED_PIDS: usize = 65_536;
@@ -102,7 +106,7 @@ pub const MAX_KIND_LEN: usize = 64;
 pub const MAX_IDENTITY_LEN: usize = 512;
 /// Current ABI version. Bump on any incompatible change.
 /// v4: signed rules load/apply entry points and codes 10/11.
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 
 struct Identity {
     rtid: Rtid,
@@ -112,6 +116,10 @@ struct Identity {
 
 struct EngineState {
     engine: Engine,
+    /// App-level subjects keyed by package identity: the observations about
+    /// an installed app (not a running process), e.g. a signer change. Their
+    /// verdict is a pure function of these (no clock, no decay).
+    apps: BTreeMap<String, Vec<EventKind>>,
     /// Trusted monotonic time origin for this engine.
     started: Instant,
     // PID alone is not identity: Android reuses PIDs. The adapter supplies a
@@ -271,6 +279,7 @@ pub fn engine_new(boot_nonce: u64) -> JssHandle {
         let inst = Instance {
             state: Mutex::new(EngineState {
                 engine,
+                apps: BTreeMap::new(),
                 started: Instant::now(),
                 identities: BTreeMap::new(),
                 retired: BTreeMap::new(),
@@ -332,6 +341,11 @@ pub fn submit(
             at_ms,
         })
         .map_err(|_| ERR_INVALID)?;
+        // App-level kinds describe an installed app, not a process: they must
+        // go through submit_app_event.
+        if is_app_kind(validated.kind) {
+            return Err(ERR_INVALID);
+        }
 
         let inst = lookup(handle)?;
         let mut st = inst.state.lock().map_err(|_| ERR_POISONED)?;
@@ -642,6 +656,87 @@ pub extern "C" fn jss_engine_free(handle: JssHandle) -> i32 {
     engine_free(handle)
 }
 
+fn is_app_kind(k: EventKind) -> bool {
+    k.is_app_level()
+}
+
+/// Submit an app-level observation about an installed app (no process), such
+/// as `app_signer_changed`, `sensitive_permission_granted` or
+/// `new_app_with_sensitive_access`. Process kinds are rejected here, and
+/// app-level kinds are rejected by [`submit`]. Subjects are keyed by the
+/// canonical package identity and capped at [`MAX_APP_SUBJECTS`].
+pub fn submit_app_event(
+    handle: JssHandle,
+    package_identity: &[u8],
+    kind: &[u8],
+    detail: &[u8],
+) -> i32 {
+    let result = guarded(|| {
+        let identity = checked_text(package_identity, MAX_IDENTITY_LEN, false)?;
+        let kind = checked_text(kind, MAX_KIND_LEN, false)?;
+        if detail.len() > MAX_DETAIL_LEN {
+            return Err(ERR_INVALID);
+        }
+        let detail = std::str::from_utf8(detail)
+            .map_err(|_| ERR_INVALID)?
+            .to_owned();
+        // Reuse the protocol's vocabulary and detail checks. The pid is a
+        // placeholder required by the wire format; app events have none.
+        let validated = validate(&WireEvent {
+            schema_version: PROTOCOL_VERSION,
+            pid: 1,
+            kind,
+            detail,
+            at_ms: 0,
+        })
+        .map_err(|_| ERR_INVALID)?;
+        if !is_app_kind(validated.kind) {
+            return Err(ERR_INVALID);
+        }
+        let inst = lookup(handle)?;
+        let mut st = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        if !st.apps.contains_key(&identity) && st.apps.len() >= MAX_APP_SUBJECTS {
+            return Err(ERR_CAPACITY);
+        }
+        let rules = *st.engine.rules();
+        let kinds = st.apps.entry(identity.clone()).or_default();
+        if kinds.len() >= MAX_APP_EVENTS {
+            return Err(ERR_CAPACITY);
+        }
+        let (_, before) = rules.assess_app(kinds);
+        kinds.push(validated.kind);
+        let (score, after) = rules.assess_app(kinds);
+        if after != before {
+            st.push_alert(format!(
+                "[app] {identity} {before:?} -> {after:?} (risk {score:.1})"
+            ));
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// The engine's verdict for an app subject under the active (possibly signed)
+/// rules: policy action ordinal (0 Allow, 1 Monitor, 2 Restrict, 3 Suspend,
+/// 4 Block) and risk score. Deterministic: the weights of its observations
+/// are summed, with no time decay. An app with no observations is `(0, 0.0)`.
+/// Structured, so callers never parse alert text.
+pub fn app_assessment(handle: JssHandle, package_identity: &[u8]) -> Result<(u32, f32), i32> {
+    guarded(|| {
+        let identity = checked_text(package_identity, MAX_IDENTITY_LEN, false)?;
+        let inst = lookup(handle)?;
+        let st = inst.state.lock().map_err(|_| ERR_POISONED)?;
+        let Some(kinds) = st.apps.get(&identity) else {
+            return Ok((0, 0.0));
+        };
+        let (score, action) = st.engine.rules().assess_app(kinds);
+        Ok((action as u32, score))
+    })
+}
+
 /// Build a byte slice from a caller buffer. A zero length never touches the
 /// pointer (null is fine); a non-zero length with a null pointer is an error.
 ///
@@ -741,6 +836,80 @@ pub unsafe extern "C" fn jss_engine_take_alerts(
         }
         Err(e) => e,
     }
+}
+
+/// C ABI for [`submit_app_event`].
+///
+/// # Safety
+/// Every buffer with a non-zero length must be readable for that length until
+/// this function returns and must not be written by another thread meanwhile.
+#[no_mangle]
+pub unsafe extern "C" fn jss_engine_submit_app_event(
+    handle: JssHandle,
+    package_identity: *const u8,
+    package_identity_len: usize,
+    kind: *const u8,
+    kind_len: usize,
+    detail: *const u8,
+    detail_len: usize,
+) -> i32 {
+    // SAFETY: buffer readability is this function's documented contract.
+    let bufs = unsafe {
+        (
+            caller_bytes(package_identity, package_identity_len, MAX_IDENTITY_LEN),
+            caller_bytes(kind, kind_len, MAX_KIND_LEN),
+            caller_bytes(detail, detail_len, MAX_DETAIL_LEN),
+        )
+    };
+    match bufs {
+        (Ok(i), Ok(k), Ok(d)) => submit_app_event(handle, i, k, d),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => e,
+    }
+}
+
+/// C ABI for [`app_assessment`]: writes the action ordinal and the score in
+/// thousandths (clamped to 0..=u32::MAX).
+///
+/// # Safety
+/// The identity buffer must be readable for its length; `out_action` and
+/// `out_score_milli` must be valid, aligned, writable pointers for the call.
+#[no_mangle]
+pub unsafe extern "C" fn jss_engine_app_assessment(
+    handle: JssHandle,
+    package_identity: *const u8,
+    package_identity_len: usize,
+    out_action: *mut u32,
+    out_score_milli: *mut u32,
+) -> i32 {
+    if out_action.is_null() || out_score_milli.is_null() {
+        return ERR_NULL;
+    }
+    // SAFETY: readability is this function's documented contract.
+    let id = match unsafe { caller_bytes(package_identity, package_identity_len, MAX_IDENTITY_LEN) }
+    {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    match app_assessment(handle, id) {
+        Ok((action, score)) => {
+            // SAFETY: both pointers checked non-null and writable per contract.
+            unsafe {
+                *out_action = action;
+                *out_score_milli = score_milli(score);
+            }
+            OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Score in thousandths, clamped; non-finite scores map to the maximum (they
+/// already decide Block, fail-closed).
+pub fn score_milli(score: f32) -> u32 {
+    if !score.is_finite() {
+        return u32::MAX;
+    }
+    (score.max(0.0) * 1000.0).min(u32::MAX as f32) as u32
 }
 
 /// Current bridge ABI version.

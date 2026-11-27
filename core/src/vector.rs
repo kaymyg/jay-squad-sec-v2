@@ -44,6 +44,9 @@ impl BehaviorVector {
             PersistenceWrite => self.persistence += 3.0,
             TempExecution => self.filesystem += 2.0,
             DeletedExecutable => self.memory += 2.0,
+            AppSignerChanged => self.injection += 3.0,
+            SensitivePermissionGranted => self.privilege += 2.0,
+            NewAppWithSensitiveAccess => self.persistence += 1.0,
             _ => {}
         }
     }

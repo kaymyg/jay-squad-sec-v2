@@ -60,6 +60,23 @@ public final class BridgeTest {
             NativeBridge.nativeFree(h);
         });
 
+        run("app-level events give a structured verdict through JNI", () -> {
+            long h = NativeBridge.nativeNew(9);
+            byte[] app = utf8("com.example.bank:sha256:aa");
+            check(NativeBridge.nativeAppAssessment(h, app) == 0L, "unknown app: Allow, score 0");
+            check(NativeBridge.nativeSubmitAppEvent(h, app, utf8("app_signer_changed"), utf8(""))
+                  == NativeBridge.OK, "submit signer change");
+            long r = NativeBridge.nativeAppAssessment(h, app);
+            check((r >>> 32) == 2 && (r & 0xFFFFFFFFL) == 60_000, "signer change: Restrict at 60.000, got " + r);
+            check(NativeBridge.nativeSubmitAppEvent(h, app, utf8("credential_access"), utf8(""))
+                  == NativeBridge.ERR_INVALID, "process kinds refused on the app path");
+            check(NativeBridge.nativeSubmitAppEvent(h, null, utf8("app_signer_changed"), utf8(""))
+                  != NativeBridge.OK, "null identity refused");
+            check(NativeBridge.nativeAppAssessment(h, null) < 0, "null identity: negative error");
+            NativeBridge.nativeFree(h);
+            check(NativeBridge.nativeAppAssessment(h, app) == -NativeBridge.ERR_BAD_HANDLE, "freed handle");
+        });
+
         run("detection flows out through JNI", () -> {
             long h = NativeBridge.nativeNew(7);
             check(h != 0, "new");
