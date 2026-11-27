@@ -72,3 +72,8 @@ one-off anomaly de-escalates instead of poisoning a process forever —
 4. First real sensor (Linux, needs root): watch process exec events with
    `aya` (eBPF tracepoint `sched_process_exec`) and feed them into the bus —
    suddenly `cargo run` monitors your actual machine at L0.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up and run the checks,
+and [SECURITY.md](SECURITY.md) for reporting vulnerabilities privately.
