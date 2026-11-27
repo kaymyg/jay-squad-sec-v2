@@ -28,6 +28,14 @@ The debug APK, when CI builds it successfully, is written under
 - Reads package labels, package names, current signing-certificate SHA-256
   digest(s), requested permissions and the granted flag reported by Android.
 - Supports refreshing the visible inventory.
+- Keeps a baseline of each visible app's signer set and granted sensitive
+  runtime permissions (app-private, excluded from backup and transfer) and
+  reports changes since it: new or removed apps, a changed signing
+  certificate, and newly granted or removed sensitive permissions. The user
+  accepts changes to make them the new baseline. A corrupted or altered
+  baseline file is rejected whole, replaced, and reported.
+- Runs a native engine self-test at launch (synthetic events for a fake
+  identity) to prove the Rust core loads and decides on this device.
 - Includes a small process-generation tracker with unit tests. It requires a
   legitimate observation source to provide a stable process-start token; the
   app does not currently claim to observe arbitrary third-party processes.
@@ -54,10 +62,12 @@ cloud service or telemetry upload is enabled in this stage.
 
 ## Native engine status
 
-The Java and Kotlin bridge sources are included in the Android module source
-sets. The Rust shared library is not yet built and packaged for Android ABIs.
-The dashboard therefore remains usable as an inventory-only app; creating a
-native engine will require the ABI-specific library to be present.
+`android/build-native.sh` cross-compiles the Rust bridge for arm64-v8a,
+armeabi-v7a and x86_64 (16 KB page aligned), and CI packages it into the APK
+and fails if any ABI is missing. The self-test has passed on a physical
+32-bit ARM phone (Android 14). Inventory changes are not yet fed to the
+engine: that needs Android event kinds in the core, which changes the signed
+rules format and gets its own reviewed step.
 
 Signed rules updates remain fail-closed. Release builds must embed the Android
 builder public key and an explicit minimum rules version. Never use the
@@ -65,12 +75,20 @@ published test key in a release build.
 
 ## Next engineering gates
 
-1. Run Gradle unit tests and build the debug APK in CI.
-2. Cross-compile the Rust bridge for arm64-v8a, armeabi-v7a and x86_64 with the
-   Android NDK and package the resulting shared libraries.
-3. Compile and test the Kotlin bridge wrapper as part of the Android module.
-4. Add Keystore-backed anti-rollback state and verify signed rules on device.
-5. Test inventory and signer observations on physical devices across Android
-   versions and OEM builds.
-6. Only then design opt-in network observation, battery profiling and
+Done: Gradle tests and debug APK in CI; NDK build packaged for all ABIs;
+Kotlin bridge compiled in the Android module; engine self-test on a device.
+
+1. Add Android event kinds to the core (new app, signer change, sensitive
+   permission granted) with a versioned rules format, and feed baseline
+   changes to the engine.
+2. Release signing with an offline key, separate from the debug key.
+3. Verify signed rules on device with a release build.
+4. Test across more Android versions and OEM builds.
+5. Only then design opt-in network observation, battery profiling and
    lifecycle-safe monitoring.
+
+On Keystore: an app's Keystore keys are deleted when its data is cleared or it
+is reinstalled, so a Keystore-backed high-water mark cannot survive a data
+wipe. It would only add protection against file tampering. The defense
+against rollback after a wipe is the compiled `JSS_ANDROID_MIN_RULES_VERSION`,
+raised every release.

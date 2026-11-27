@@ -140,8 +140,9 @@ behaving like a fresh install.
 Known limit: the high-water mark lives in the engine, not in tamper-proof
 storage. A brand-new engine (for example after the app's data is wiped) trusts
 whatever verified state is on disk, bounded below only by
-`JSS_ANDROID_MIN_RULES_VERSION`. Raise that each release; a Keystore-backed
-high-water mark is planned. Several engines sharing one directory each keep
+`JSS_ANDROID_MIN_RULES_VERSION`. Raise that each release. (Android Keystore
+keys are deleted with the app's data, so a Keystore-backed mark would not
+survive a wipe either; it could only add tamper resistance.) Several engines sharing one directory each keep
 their own active rules until they reload; the app should run one engine.
 
 The update payload is decoded as `RulesConfig` and fully validated by the
